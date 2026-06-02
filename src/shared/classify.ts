@@ -159,6 +159,28 @@ export function isModelViewerCompatible(url: string, mime?: string): boolean {
   return ext === "glb" || ext === "gltf" || mime === "model/gltf-binary" || mime === "model/gltf+json";
 }
 
+// Image formats a browser <img> can actually decode. We classify HEIC/JXL/EXR/HDR/
+// TIFF as "image", but Chrome can't display them — gate those to a download card
+// instead of a misleading "failed to load".
+const DECODABLE_IMAGE_EXT = new Set(["png", "jpg", "jpeg", "gif", "webp", "avif", "bmp", "ico", "svg", "apng", "jfif"]);
+const DECODABLE_IMAGE_MIME = new Set([
+  "image/png", "image/jpeg", "image/gif", "image/webp", "image/avif",
+  "image/bmp", "image/x-icon", "image/vnd.microsoft.icon", "image/svg+xml", "image/apng"
+]);
+
+export function isBrowserDecodableImage(url: string, mime?: string): boolean {
+  const normalized = mime?.split(";")[0]?.trim().toLowerCase();
+  if (normalized && DECODABLE_IMAGE_MIME.has(normalized)) return true;
+  if (normalized && normalized.startsWith("image/") && !DECODABLE_IMAGE_MIME.has(normalized)) {
+    // A specific, known-undisplayable image MIME (heic/heif/jxl/tiff/...).
+    return false;
+  }
+  const ext = getExtension(url);
+  if (ext && DECODABLE_IMAGE_EXT.has(ext)) return true;
+  // Unknown extension and no decisive MIME: let the render-probe decide.
+  return !ext;
+}
+
 // MIME types the wire gives us that carry no real signal — for these we trust
 // the bytes over the header. Servers routinely mislabel real assets like this.
 const GENERIC_MIMES = new Set([

@@ -25,6 +25,7 @@ export type RuntimeMessage =
   | { type: "TOGGLE_DEEP_CAPTURE"; tabId: number; enabled: boolean }
   | { type: "ASSET_BODY"; key: string; mime?: string; base64: string; pageUrl: string }
   | { type: "GET_ASSET_BODY"; assetId: string; tabId?: number }
+  | { type: "FETCH_TEXT"; url: string; tabId?: number }
   | { type: "DOWNLOAD_ASSET"; url: string; filename?: string; assetId?: string }
   | { type: "PICKER_ACTIVATE"; tabId: number }
   | { type: "PICKER_DEACTIVATE"; tabId: number }
@@ -36,7 +37,8 @@ export type RuntimeResponse =
   | { ok: true; export: ExportResult }
   | { ok: true; deepCaptureAttached: boolean }
   | { ok: true; downloadId?: number }
-  | { ok: true; body: { mime: string; dataUrl: string } | null }
+  | { ok: true; body: { mime: string; dataUrl: string; byteLength: number } | null }
+  | { ok: true; text: { content: string; truncated: boolean; ok: boolean; status?: number; contentType?: string } | null }
   | { ok: false; error: string };
 
 export interface PickerResult {

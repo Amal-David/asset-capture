@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowDown, ArrowUp, Box, Check, ChevronDown, Clipboard, Copy, Crosshair, Database, Download, ExternalLink, Eye, FileArchive, FileJson, FileSpreadsheet, FileText, Inbox, List, Network, RefreshCw, ScanSearch, Search, Shield, Trash2, X, Zap } from "lucide-react";
+import { AlertTriangle, ArrowDown, ArrowUp, Box, Check, ChevronDown, Clipboard, Copy, Crosshair, Database, Download, ExternalLink, Eye, FileArchive, FileJson, FileSpreadsheet, FileText, Inbox, List, Loader2, Network, RefreshCw, ScanSearch, Search, Shield, Trash2, X, Zap } from "lucide-react";
 import { useInspectorStore } from "./store";
 import type { SortDir, SortKey, StatusFilter } from "./store";
 import type { AssetKind, AssetRecord, ExportJob } from "../shared/types";
-import { isModelViewerCompatible, isPreviewableKind } from "../shared/classify";
-import { safeFilename } from "../shared/url";
+import { isBrowserDecodableImage, isModelViewerCompatible, isPreviewableKind } from "../shared/classify";
+import { base64ToBytes, safeFilename } from "../shared/url";
 import "../styles/global.css";
 
 // Static class strings (not interpolated) so Tailwind keeps them at build time.
@@ -753,10 +753,7 @@ function ContextItem({ icon, label, onClick, disabled }: { icon: React.ReactNode
 }
 
 function PreviewDrawer({ asset, compact, onClose, onContextMenu }: { asset: AssetRecord; compact: boolean; onClose: () => void; onContextMenu: (event: React.MouseEvent, asset: AssetRecord) => void }) {
-  const { downloadAsset, getAssetBody } = useInspectorStore();
-  const [textContent, setTextContent] = useState<string | null>(null);
-  const [textError, setTextError] = useState(false);
-  const [bodyUrl, setBodyUrl] = useState<string | null>(null);
+  const { downloadAsset } = useInspectorStore();
   const [copied, setCopied] = useState(false);
 
   useEffect(() => {
@@ -765,39 +762,6 @@ function PreviewDrawer({ asset, compact, onClose, onContextMenu }: { asset: Asse
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
-  // Captured bytes let blob: and authenticated-API assets preview without a
-  // re-fetch of a stale URL. Static http assets fall back to the source URL.
-  useEffect(() => {
-    setBodyUrl(null);
-    if (!asset.bodyAvailable) return;
-    let cancelled = false;
-    void getAssetBody(asset.id).then((body) => {
-      if (!cancelled && body) setBodyUrl(body.dataUrl);
-    });
-    return () => { cancelled = true; };
-  }, [asset.id, asset.bodyAvailable, getAssetBody]);
-
-  const srcUrl = bodyUrl ?? asset.url;
-  const needsTextFetch = asset.kind === "json" || asset.kind === "api" || asset.kind === "manifest" || asset.kind === "subtitle" || asset.kind === "css";
-
-  useEffect(() => {
-    if (!needsTextFetch) return;
-    if (asset.bodyAvailable && !bodyUrl) return; // wait for captured bytes before fetching
-    setTextContent(null);
-    setTextError(false);
-    fetch(srcUrl)
-      .then((r) => r.text())
-      .then((text) => {
-        if (asset.kind === "json" || asset.kind === "api" || asset.kind === "manifest") {
-          try { setTextContent(JSON.stringify(JSON.parse(text), null, 2)); } catch { setTextContent(text); }
-        } else {
-          setTextContent(text);
-        }
-      })
-      .catch(() => setTextError(true));
-  }, [srcUrl, asset.kind, asset.bodyAvailable, bodyUrl, needsTextFetch]);
-
-  const previewable = isPreviewableKind(asset.kind);
   const copyUrl = () => {
     void navigator.clipboard.writeText(asset.url).then(() => {
       setCopied(true);
@@ -834,33 +798,9 @@ function PreviewDrawer({ asset, compact, onClose, onContextMenu }: { asset: Asse
         </div>
 
         <div className="min-h-0 flex-1 overflow-y-auto">
-          {previewable ? (
-            <div className="preview-canvas flex min-h-[200px] items-center justify-center border-b border-slate-200 p-4">
-              {asset.kind === "image" && (
-                <img
-                  src={srcUrl}
-                  alt="Asset preview"
-                  className="max-h-[320px] max-w-full rounded object-contain"
-                  onError={(e) => {
-                    (e.target as HTMLImageElement).style.display = "none";
-                    (e.target as HTMLImageElement).parentElement!.innerHTML = '<span class="text-sm text-slate-500">Failed to load image</span>';
-                  }}
-                />
-              )}
-              {asset.kind === "video" && <video src={srcUrl} controls className="max-h-[320px] max-w-full rounded" preload="metadata" />}
-              {asset.kind === "audio" && <audio src={srcUrl} controls preload="metadata" className="w-full" />}
-              {asset.kind === "font" && <FontPreview url={srcUrl} />}
-              {asset.kind === "model" && <ModelPreview asset={asset} src={srcUrl} />}
-              {(asset.kind === "subtitle" || asset.kind === "css" || asset.kind === "json" || asset.kind === "api" || asset.kind === "manifest") && (
-                <TextPreview content={textContent} error={textError} />
-              )}
-            </div>
-          ) : (
-            <div className="flex flex-col items-center gap-2 border-b border-slate-200 bg-slate-50 px-4 py-10 text-center text-slate-400">
-              <FileText size={26} />
-              <span className="text-xs">No inline preview for {asset.kind} assets</span>
-            </div>
-          )}
+          <div className="preview-canvas flex min-h-[200px] items-center justify-center border-b border-slate-200 p-4">
+            <PreviewBody asset={asset} />
+          </div>
 
           <dl className="space-y-2 px-4 py-3 text-sm">
             <MetaRow label="URL" value={asset.url} mono clickable />
@@ -879,19 +819,211 @@ function PreviewDrawer({ asset, compact, onClose, onContextMenu }: { asset: Asse
   );
 }
 
-function FontPreview({ url }: { url: string }) {
-  const id = useRef(`preview-font-${Math.round(performance.now())}-${url.length}`);
-  const [loaded, setLoaded] = useState(false);
+const TEXT_KINDS: AssetKind[] = ["json", "api", "manifest", "subtitle", "css"];
+const LARGE_PREVIEW_BYTES = 30 * 1024 * 1024;
+
+// Orchestrates "render-or-hide": acquire a source (captured bytes preferred as an
+// object URL), then probe whether it actually decodes before showing it. Anything
+// that can't render falls back to a download/open card instead of a dead element.
+function PreviewBody({ asset }: { asset: AssetRecord }) {
+  const { getAssetBody, fetchText } = useInspectorStore();
+  const [objectUrl, setObjectUrl] = useState<string | null>(null);
+  const [byteState, setByteState] = useState<"idle" | "loading" | "ready" | "toobig">("idle");
+  const isText = TEXT_KINDS.includes(asset.kind);
 
   useEffect(() => {
+    let revoke: string | null = null;
+    let cancelled = false;
+    setObjectUrl(null);
+    if (!asset.bodyAvailable) { setByteState("idle"); return; }
+    setByteState("loading");
+    void getAssetBody(asset.id).then((body) => {
+      if (cancelled) return;
+      if (!body) { setByteState("idle"); return; }
+      if (body.byteLength > LARGE_PREVIEW_BYTES) { setByteState("toobig"); return; }
+      const url = dataUrlToObjectUrl(body.dataUrl);
+      revoke = url;
+      setObjectUrl(url);
+      setByteState("ready");
+    });
+    return () => { cancelled = true; if (revoke) URL.revokeObjectURL(revoke); };
+  }, [asset.id, asset.bodyAvailable, getAssetBody]);
+
+  if (isText) {
+    return <TextPreviewLoader asset={asset} objectUrl={objectUrl} waiting={Boolean(asset.bodyAvailable) && byteState === "loading"} fetchText={fetchText} />;
+  }
+
+  if (asset.url.startsWith("blob:") && !asset.bodyAvailable) {
+    return <FailCard asset={asset} title="Bytes not captured" desc="This blob URL is scoped to the page. Reload it with the inspector open to capture the bytes." canDownload={false} />;
+  }
+  if (byteState === "toobig") return <FailCard asset={asset} title="Large asset" desc="Too large to preview inline — download to view it." />;
+  if (asset.bodyAvailable && byteState === "loading") return <Spinner label="Loading bytes…" />;
+
+  const src = objectUrl ?? (asset.url.startsWith("blob:") ? null : asset.url);
+  if (!src) return <Spinner label="Loading…" />;
+
+  if (asset.kind === "image") {
+    if (!isBrowserDecodableImage(asset.url, asset.mime)) {
+      return <FailCard asset={asset} title={`${(asset.extension ?? "image").toUpperCase()} not displayable`} desc="Your browser can't render this image format. Download or open it instead." />;
+    }
+    return <ProbedPreview kind="image" src={src} asset={asset} />;
+  }
+  if (asset.kind === "video" || asset.kind === "audio") return <ProbedPreview kind={asset.kind} src={src} asset={asset} />;
+  if (asset.kind === "font") return <FontPreview url={src} asset={asset} />;
+  if (asset.kind === "model") return <ModelPreview asset={asset} src={src} />;
+
+  return (
+    <div className="flex flex-col items-center gap-2 py-8 text-center text-slate-400">
+      <FileText size={26} />
+      <span className="text-xs">No inline preview for {asset.kind} assets</span>
+    </div>
+  );
+}
+
+// Render the real element only once a probe confirms it decodes; on failure (incl.
+// a stall timeout for slow sites) show a download card instead of a broken player.
+function usePreviewProbe(kind: "image" | "video" | "audio", src: string): "loading" | "ready" | "failed" {
+  const [state, setState] = useState<"loading" | "ready" | "failed">("loading");
+  useEffect(() => {
+    let cancelled = false;
+    setState("loading");
+    const settle = (ok: boolean) => { if (!cancelled) setState(ok ? "ready" : "failed"); };
+    if (kind === "image") {
+      const img = new Image();
+      img.onload = () => settle(true);
+      img.onerror = () => settle(false);
+      img.src = src;
+      return () => { cancelled = true; img.onload = null; img.onerror = null; };
+    }
+    const el = document.createElement(kind);
+    el.preload = "metadata";
+    const ok = () => settle(true);
+    const bad = () => settle(false);
+    el.addEventListener("loadeddata", ok, { once: true });
+    el.addEventListener("canplay", ok, { once: true });
+    el.addEventListener("error", bad, { once: true });
+    el.src = src;
+    const timer = window.setTimeout(() => settle(false), 12000);
+    return () => { cancelled = true; window.clearTimeout(timer); el.removeAttribute("src"); el.load(); };
+  }, [kind, src]);
+  return state;
+}
+
+function ProbedPreview({ kind, src, asset }: { kind: "image" | "video" | "audio"; src: string; asset: AssetRecord }) {
+  const state = usePreviewProbe(kind, src);
+  if (state === "loading") return <Spinner label="Rendering…" />;
+  if (state === "failed") return <FailCard asset={asset} title="Couldn't render preview" desc="The asset didn't decode in the browser. Download to inspect it." />;
+  if (kind === "image") return <img src={src} alt="Asset preview" className="max-h-[320px] max-w-full rounded object-contain" />;
+  if (kind === "video") return <video src={src} controls className="max-h-[320px] max-w-full rounded" preload="metadata" />;
+  return <audio src={src} controls preload="metadata" className="w-full" />;
+}
+
+function TextPreviewLoader({ asset, objectUrl, waiting, fetchText }: { asset: AssetRecord; objectUrl: string | null; waiting: boolean; fetchText: (url: string, tabId?: number) => Promise<{ content: string; truncated: boolean; ok: boolean } | null> }) {
+  const [content, setContent] = useState<string | null>(null);
+  const [truncated, setTruncated] = useState(false);
+  const [state, setState] = useState<"loading" | "ready" | "error" | "empty">("loading");
+
+  useEffect(() => {
+    if (waiting) return;
+    let cancelled = false;
+    setState("loading"); setContent(null); setTruncated(false);
+    const pretty = (raw: string) => {
+      if (asset.kind === "json" || asset.kind === "api") {
+        try { return JSON.stringify(JSON.parse(raw), null, 2); } catch { return raw; }
+      }
+      return raw;
+    };
+    const run = async () => {
+      try {
+        if (objectUrl) {
+          const raw = await fetch(objectUrl).then((r) => r.text());
+          if (cancelled) return;
+          if (!raw) { setState("empty"); return; }
+          setContent(pretty(raw)); setState("ready");
+          return;
+        }
+        // Route through the service worker so cross-origin manifests/subtitles/APIs
+        // aren't blocked by the sidepanel origin's CORS.
+        const res = await fetchText(asset.url);
+        if (cancelled) return;
+        if (!res || (!res.ok && !res.content)) { setState("error"); return; }
+        if (!res.content) { setState("empty"); return; }
+        setContent(pretty(res.content)); setTruncated(res.truncated); setState("ready");
+      } catch {
+        if (!cancelled) setState("error");
+      }
+    };
+    void run();
+    return () => { cancelled = true; };
+  }, [asset.id, asset.url, asset.kind, objectUrl, waiting, fetchText]);
+
+  if (waiting || state === "loading") return <Spinner label="Loading…" />;
+  if (state === "error") return <FailCard asset={asset} title="Couldn't load content" desc="The text response couldn't be read (blocked, opaque, or offline)." />;
+  if (state === "empty") return <span className="text-sm text-slate-400">Empty response</span>;
+  return <TextPreview content={content} truncated={truncated} />;
+}
+
+function Spinner({ label }: { label: string }) {
+  return (
+    <div className="flex flex-col items-center gap-2 py-8 text-slate-400">
+      <Loader2 size={22} className="animate-spin" />
+      <span className="text-xs">{label}</span>
+    </div>
+  );
+}
+
+function FailCard({ asset, title, desc, canDownload = true }: { asset: AssetRecord; title: string; desc: string; canDownload?: boolean }) {
+  const { downloadAsset } = useInspectorStore();
+  return (
+    <div className="flex flex-col items-center gap-2 py-8 text-center">
+      <AlertTriangle size={24} className="text-amber-500" />
+      <span className="text-sm font-medium text-slate-700">{title}</span>
+      <span className="max-w-[300px] text-xs text-slate-400">{desc}</span>
+      <div className="mt-1 flex items-center gap-2">
+        {canDownload && (
+          <button className="flex items-center gap-1 rounded-md bg-accent px-2.5 py-1 text-xs font-medium text-white hover:bg-teal-700" onClick={() => void downloadAsset(asset.url, safeFilename(asset.url, asset.id), asset.id)}>
+            <Download size={13} /> Download
+          </button>
+        )}
+        {!asset.url.startsWith("blob:") && (
+          <button className="flex items-center gap-1 rounded-md border border-slate-200 px-2.5 py-1 text-xs text-slate-600 hover:bg-slate-50" onClick={() => chrome.tabs.create({ url: asset.url })}>
+            <ExternalLink size={13} /> Open
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function dataUrlToObjectUrl(dataUrl: string): string {
+  const comma = dataUrl.indexOf(",");
+  const mime = /data:([^;]+)/.exec(dataUrl.slice(0, comma))?.[1] ?? "application/octet-stream";
+  const bytes = base64ToBytes(dataUrl.slice(comma + 1));
+  return URL.createObjectURL(new Blob([bytes as unknown as BlobPart], { type: mime }));
+}
+
+function FontPreview({ url, asset }: { url: string; asset: AssetRecord }) {
+  const id = useRef(`preview-font-${Math.round(performance.now())}-${url.length}`);
+  const [state, setState] = useState<"loading" | "ready" | "failed">("loading");
+
+  useEffect(() => {
+    let cancelled = false;
     const face = new FontFace(id.current, `url(${CSS.escape(url)})`);
+    const timer = window.setTimeout(() => { if (!cancelled) setState("failed"); }, 6000);
     face.load().then((f) => {
+      if (cancelled) return;
       document.fonts.add(f);
-      setLoaded(true);
-    }).catch(() => setLoaded(false));
+      setState("ready");
+      window.clearTimeout(timer);
+    }).catch(() => {
+      if (!cancelled) setState("failed");
+      window.clearTimeout(timer);
+    });
+    return () => { cancelled = true; window.clearTimeout(timer); };
   }, [url]);
 
-  if (!loaded) return <span className="text-sm text-slate-500">Loading font…</span>;
+  if (state === "loading") return <Spinner label="Loading font…" />;
+  if (state === "failed") return <FailCard asset={asset} title="Couldn't load font" desc="The font didn't load (CORS, format, or a revoked URL). Download to inspect it." />;
 
   return (
     <div style={{ fontFamily: id.current }} className="space-y-2 text-center text-slate-700">
@@ -925,12 +1057,14 @@ function ModelPreview({ asset, src }: { asset: AssetRecord; src: string }) {
   );
 }
 
-function TextPreview({ content, error }: { content: string | null; error: boolean }) {
-  if (error) return <span className="text-sm text-slate-500">Failed to load content</span>;
+function TextPreview({ content, truncated }: { content: string | null; truncated?: boolean }) {
   if (content === null) return <span className="text-sm text-slate-500">Loading…</span>;
+  const RENDER_CAP = 20000;
+  const cut = truncated || content.length > RENDER_CAP;
   return (
     <div className="max-h-[320px] w-full overflow-auto rounded-md bg-slate-900 p-3">
-      <pre className="whitespace-pre-wrap break-all font-mono text-xs leading-relaxed text-slate-100">{content.slice(0, 8000)}</pre>
+      <pre className="whitespace-pre-wrap break-all font-mono text-xs leading-relaxed text-slate-100">{content.slice(0, RENDER_CAP)}</pre>
+      {cut && <div className="pt-2 text-center text-[10px] text-slate-400">… truncated for display</div>}
     </div>
   );
 }

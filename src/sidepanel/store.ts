@@ -49,7 +49,8 @@ interface InspectorState {
   exportAs: (type: ExportJob["type"], tabId?: number, selectedIds?: string[]) => Promise<void>;
   toggleDeepCapture: (tabId: number, enabled: boolean) => Promise<void>;
   downloadAsset: (url: string, filename?: string, assetId?: string) => Promise<void>;
-  getAssetBody: (assetId: string) => Promise<{ mime: string; dataUrl: string } | null>;
+  getAssetBody: (assetId: string) => Promise<{ mime: string; dataUrl: string; byteLength: number } | null>;
+  fetchText: (url: string, tabId?: number) => Promise<{ content: string; truncated: boolean; ok: boolean; status?: number; contentType?: string } | null>;
   activatePicker: (tabId: number) => Promise<void>;
   deactivatePicker: (tabId: number) => Promise<void>;
   clearPickerResult: () => void;
@@ -151,6 +152,12 @@ export const useInspectorStore = create<InspectorState>((set, get) => ({
   getAssetBody: async (assetId) => {
     const response = await sendMessage({ type: "GET_ASSET_BODY", assetId });
     if (response.ok && "body" in response) return response.body;
+    if (!response.ok) set({ error: response.error });
+    return null;
+  },
+  fetchText: async (url, tabId) => {
+    const response = await sendMessage({ type: "FETCH_TEXT", url, tabId });
+    if (response.ok && "text" in response) return response.text;
     if (!response.ok) set({ error: response.error });
     return null;
   },

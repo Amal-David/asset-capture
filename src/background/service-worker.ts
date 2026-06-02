@@ -176,7 +176,32 @@ async function handleMessage(message: RuntimeMessage, sender: chrome.runtime.Mes
   if (message.type === "GET_ASSET_BODY") {
     const record = await db.assetBodies.get(message.assetId);
     if (!record) return { ok: true, body: null };
-    return { ok: true, body: { mime: record.mime, dataUrl: bytesToDataUrl(record.bytes, record.mime) } };
+    return { ok: true, body: { mime: record.mime, dataUrl: bytesToDataUrl(record.bytes, record.mime), byteLength: record.byteLength } };
+  }
+
+  if (message.type === "FETCH_TEXT") {
+    // The service worker has host permissions, so it can read cross-origin text
+    // (CDN manifests, subtitles, APIs) the sidepanel origin can't. credentials are
+    // omitted so we never re-trigger authenticated side effects.
+    try {
+      const response = await fetch(message.url, { credentials: "omit" });
+      if (response.type === "opaque") return { ok: true, text: { content: "", truncated: false, ok: false } };
+      const raw = await response.text();
+      const LIMIT = 200_000;
+      const truncated = raw.length > LIMIT;
+      return {
+        ok: true,
+        text: {
+          content: truncated ? raw.slice(0, LIMIT) : raw,
+          truncated,
+          ok: response.ok,
+          status: response.status,
+          contentType: response.headers.get("content-type") ?? undefined
+        }
+      };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : "Fetch failed" };
+    }
   }
 
   if (message.type === "DOWNLOAD_ASSET") {
