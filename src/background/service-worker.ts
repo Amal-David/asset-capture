@@ -76,22 +76,60 @@ chrome.runtime.onMessage.addListener((message: RuntimeMessage, sender, sendRespo
   return true;
 });
 
+// requestId -> response meta, so loadingFinished can fetch the body by URL.
+const debuggerResponses = new Map<string, { url: string; mime?: string }>();
+
 chrome.debugger.onEvent.addListener((source, method, params) => {
   if (!source.tabId || !method.startsWith("Network.")) return;
+  const tabId = source.tabId;
   const event = params as Record<string, unknown>;
+
+  if (method === "Network.responseReceived") {
+    const response = event.response as Record<string, unknown> | undefined;
+    const requestId = typeof event.requestId === "string" ? event.requestId : undefined;
+    const url = typeof response?.url === "string" ? response.url : undefined;
+    if (requestId && url) debuggerResponses.set(requestId, { url, mime: typeof response?.mimeType === "string" ? response.mimeType : undefined });
+  }
+
   const url = extractDebuggerUrl(event);
-  if (!url) return;
-  void upsertAsset({
-    sessionId: sessionIdForTab(source.tabId),
-    tabId: source.tabId,
-    url,
-    method: typeof event.method === "string" ? event.method : undefined,
-    status: typeof event.status === "number" ? event.status : undefined,
-    mime: typeof event.mimeType === "string" ? event.mimeType : undefined,
-    initiator: "Chrome Debugger Network domain",
-    sources: ["devtools"]
-  });
+  if (url) {
+    void upsertAsset({
+      sessionId: sessionIdForTab(tabId),
+      tabId,
+      url,
+      method: typeof event.method === "string" ? event.method : undefined,
+      status: typeof event.status === "number" ? event.status : undefined,
+      mime: typeof event.mimeType === "string" ? event.mimeType : undefined,
+      initiator: "Chrome Debugger Network domain",
+      sources: ["devtools"]
+    });
+  }
+
+  // The debugger is the only MV3 way to read bytes the page never fetched —
+  // browser-initiated static assets, opaque cross-origin, and PWA service-worker /
+  // Cache-API replays that webRequest sees only as bodiless cache hits.
+  if (method === "Network.loadingFinished") {
+    const requestId = typeof event.requestId === "string" ? event.requestId : undefined;
+    if (requestId) void captureDebuggerBody(tabId, requestId);
+  } else if (method === "Network.loadingFailed") {
+    const requestId = typeof event.requestId === "string" ? event.requestId : undefined;
+    if (requestId) debuggerResponses.delete(requestId);
+  }
 });
+
+async function captureDebuggerBody(tabId: number, requestId: string): Promise<void> {
+  const meta = debuggerResponses.get(requestId);
+  debuggerResponses.delete(requestId);
+  if (!meta) return;
+  try {
+    const result = (await chrome.debugger.sendCommand({ tabId }, "Network.getResponseBody", { requestId })) as { body?: string; base64Encoded?: boolean } | undefined;
+    if (!result?.body) return;
+    const bytes = result.base64Encoded ? base64ToBytes(result.body) : new TextEncoder().encode(result.body);
+    await persistAssetBody({ sessionId: sessionIdForTab(tabId), tabId, key: meta.url, bytes, declaredMime: meta.mime, source: "devtools" });
+  } catch {
+    // Body may be unavailable (evicted, redirect, no content); metadata still stands.
+  }
+}
 
 chrome.debugger.onDetach.addListener((source) => {
   if (source.tabId) deepCaptureTabs.delete(source.tabId);
@@ -289,6 +327,9 @@ async function recordPageHookEvent(message: Extract<RuntimeMessage, { type: "PAG
       tabId,
       frameId,
       url: event.blobUrl,
+      // MediaSource blob URLs carry a "video" hint so they classify as video
+      // (otherwise mimeless blob: URLs land as "binary").
+      kind: event.hintKind,
       mime: event.mime,
       size: event.size,
       initiator: pageUrl,
@@ -336,14 +377,36 @@ async function storeAssetBody(
   message: Extract<RuntimeMessage, { type: "ASSET_BODY" }>,
   tabId?: number
 ): Promise<void> {
-  const sessionId = sessionIdForTab(tabId);
-  const assetId = `asset-${stableId(`${sessionId}:${message.key}`)}`;
-  const bytes = base64ToBytes(message.base64);
+  await persistAssetBody({
+    sessionId: sessionIdForTab(tabId),
+    tabId,
+    key: message.key,
+    bytes: base64ToBytes(message.base64),
+    declaredMime: message.mime,
+    pageUrl: message.pageUrl,
+    source: message.key.startsWith("blob:") ? "blob" : "fetch"
+  });
+}
+
+const MAX_STORED_BODY_BYTES = 16 * 1024 * 1024;
+
+async function persistAssetBody(input: {
+  sessionId: string;
+  tabId?: number;
+  key: string;
+  bytes: Uint8Array;
+  declaredMime?: string;
+  pageUrl?: string;
+  source: CaptureSource;
+}): Promise<void> {
+  const { sessionId, tabId, key, bytes, declaredMime, pageUrl, source } = input;
+  if (!key || bytes.byteLength === 0 || bytes.byteLength > MAX_STORED_BODY_BYTES) return;
+  const assetId = `asset-${stableId(`${sessionId}:${key}`)}`;
   // Intelligent detection: when the wire MIME is missing/generic, trust the
   // bytes. This rescues mislabeled assets (octet-stream images, extensionless
   // CDN/object-store URLs) that would otherwise be unclassified & unpreviewable.
-  const sniffed = isGenericMime(message.mime) ? sniffMimeFromBytes(bytes.subarray(0, 64)) : undefined;
-  const mime = sniffed ?? message.mime ?? "application/octet-stream";
+  const sniffed = isGenericMime(declaredMime) ? sniffMimeFromBytes(bytes.subarray(0, 64)) : undefined;
+  const mime = sniffed ?? declaredMime ?? "application/octet-stream";
   try {
     await db.assetBodies.put({ assetId, sessionId, mime, bytes, byteLength: bytes.byteLength, createdAt: Date.now() });
   } catch {
@@ -354,7 +417,6 @@ async function storeAssetBody(
   // the merge, and so byte-derived knowledge upgrades a previously-binary asset.
   const updated = await db.assets.where("id").equals(assetId).modify((asset) => {
     asset.bodyAvailable = true;
-    // A byte-sniffed MIME beats a stored generic one; otherwise fill if absent.
     if (sniffed && isGenericMime(asset.mime)) asset.mime = sniffed;
     else if (!asset.mime) asset.mime = mime;
     const kind = classifyAsset({ url: asset.url, mime: asset.mime, resourceType: asset.resourceType ?? asset.sources[0], sources: asset.sources });
@@ -364,15 +426,7 @@ async function storeAssetBody(
   });
   if (updated > 0) return;
   // Body may arrive before the metadata event; create the asset so it is visible.
-  await upsertAsset({
-    sessionId,
-    tabId,
-    url: message.key,
-    mime,
-    initiator: message.pageUrl,
-    sources: message.key.startsWith("blob:") ? ["blob"] : ["fetch"],
-    bodyAvailable: true
-  });
+  await upsertAsset({ sessionId, tabId, url: key, mime, initiator: pageUrl, sources: [source], bodyAvailable: true });
 }
 
 async function recordRequest(

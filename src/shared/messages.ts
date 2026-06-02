@@ -1,8 +1,8 @@
-import type { AssetRecord, BlobRecord, ExportResult, MediaRecord, RequestEvent, SessionSnapshot } from "./types";
+import type { AssetKind, AssetRecord, BlobRecord, ExportResult, MediaRecord, RequestEvent, SessionSnapshot } from "./types";
 
 export type PageHookEvent =
   | { kind: "fetch" | "xhr"; url: string; method?: string; status?: number; mime?: string; size?: number; timestamp: number }
-  | { kind: "blob"; blobUrl: string; mime?: string; size?: number; producerApi: string; stack?: string; timestamp: number }
+  | { kind: "blob"; blobUrl: string; mime?: string; size?: number; producerApi: string; stack?: string; hintKind?: AssetKind; timestamp: number }
   | { kind: "blob-revoked"; blobUrl: string; timestamp: number }
   | { kind: "data-url"; url: string; mime?: string; size?: number; producerApi: string; timestamp: number };
 

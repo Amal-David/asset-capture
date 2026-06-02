@@ -20,23 +20,81 @@
 
   const textToBuffer = (value: string): ArrayBuffer => new TextEncoder().encode(value).buffer;
 
+  // MSE plumbing: adaptive players (YouTube/Twitch/HTML5 video) feed a MediaSource
+  // via createObjectURL and push segments through SourceBuffer.appendBuffer. We map
+  // MediaSource -> blob URL, accumulate appended segments, and post them so the
+  // <video src=blob:> asset becomes a real, classifiable, downloadable video.
+  const mediaSourceUrls = new WeakMap<MediaSource, string>();
+  const sourceBufferOwner = new WeakMap<SourceBuffer, MediaSource>();
+  const mseParts = new Map<string, { parts: Uint8Array[]; total: number; timer?: number }>();
+
+  const accumulateMse = (url: string, chunk: Uint8Array) => {
+    let entry = mseParts.get(url);
+    if (!entry) { entry = { parts: [], total: 0 }; mseParts.set(url, entry); }
+    if (entry.total >= MAX_BODY_BYTES) return;
+    entry.parts.push(chunk);
+    entry.total += chunk.byteLength;
+    if (entry.timer) clearTimeout(entry.timer);
+    const current = entry;
+    entry.timer = window.setTimeout(() => {
+      const cap = Math.min(current.total, MAX_BODY_BYTES);
+      const merged = new Uint8Array(cap);
+      let offset = 0;
+      for (const part of current.parts) {
+        if (offset >= cap) break;
+        const slice = part.subarray(0, Math.min(part.byteLength, cap - offset));
+        merged.set(slice, offset);
+        offset += slice.byteLength;
+      }
+      postBody(url, undefined, merged.buffer);
+    }, 1500);
+  };
+
   const originalCreateObjectURL = URL.createObjectURL.bind(URL);
   const originalRevokeObjectURL = URL.revokeObjectURL.bind(URL);
   URL.createObjectURL = (object: Blob | MediaSource) => {
     const blobUrl = originalCreateObjectURL(object);
     const blob = object instanceof Blob ? object : undefined;
+    const isMediaSource = typeof MediaSource !== "undefined" && object instanceof MediaSource;
+    if (isMediaSource) mediaSourceUrls.set(object, blobUrl);
     post({
       kind: "blob",
       blobUrl,
       mime: blob?.type,
       size: blob?.size,
-      producerApi: "URL.createObjectURL",
+      producerApi: isMediaSource ? "URL.createObjectURL(MediaSource)" : "URL.createObjectURL",
+      hintKind: isMediaSource ? "video" : undefined,
       stack: new Error().stack,
       timestamp: Date.now()
     });
     if (blob) captureBlobBody(blobUrl, blob);
     return blobUrl;
   };
+
+  if (typeof MediaSource !== "undefined") {
+    const originalAddSourceBuffer = MediaSource.prototype.addSourceBuffer;
+    MediaSource.prototype.addSourceBuffer = function patchedAddSourceBuffer(type: string): SourceBuffer {
+      const sourceBuffer = originalAddSourceBuffer.call(this, type);
+      sourceBufferOwner.set(sourceBuffer, this);
+      return sourceBuffer;
+    };
+    const originalAppendBuffer = SourceBuffer.prototype.appendBuffer;
+    SourceBuffer.prototype.appendBuffer = function patchedAppendBuffer(data: BufferSource) {
+      try {
+        const owner = sourceBufferOwner.get(this);
+        const url = owner ? mediaSourceUrls.get(owner) : undefined;
+        if (url) {
+          const view = data instanceof ArrayBuffer
+            ? new Uint8Array(data.slice(0))
+            : new Uint8Array(data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength));
+          accumulateMse(url, view);
+        }
+      } catch {
+        // Capturing must never break media playback.
+      }
+      return originalAppendBuffer.call(this, data as ArrayBuffer);
+    };
+  }
 
   URL.revokeObjectURL = (url: string) => {
     post({ kind: "blob-revoked", blobUrl: url, timestamp: Date.now() });
