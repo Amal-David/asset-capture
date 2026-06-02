@@ -62,5 +62,9 @@ Goal: most comprehensive + intelligent asset-capture extension. Adversarial agen
   export redaction, streams visible in popup, silent background poll (preserves action errors),
   broadened secret patterns (ya29/openai/github-pat/PEM), startup orphan-session sweep, MSE re-post
   throttle, drawer role=dialog focus trap/restore, id-based keyboard focus. 41 tests.
-- Iteration 4: convergence-check round (verify round-3 fixes; only genuine must-fixes). Running.
-- Standing deferred (need new dep / user approval): hls.js playable preview; list virtualizer.
+- Round 4 (wyn70oa0p): 1 finding (unbounded requests table) -> fixed (ab8e4f7): per-session cap +
+  try/catch + header redaction at rest. Visually verified compact/popup streams + PDF document kind.
+- Round 5 (weassbpfr): CONVERGED-CLEAN — zero must-fix findings. Loop converged (20->14->11->1->0).
+- Iteration 6 (dep-free comprehensiveness): archive entry listing (existing fflate dep), image
+  dimensions in preview. Then final adversarial check + consolidated report.
+- Standing deferred (need NEW dep / user approval): hls.js playable preview; list virtualizer.

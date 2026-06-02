@@ -153,7 +153,7 @@ function classifyByMime(mime?: string): AssetKind {
 }
 
 export function isPreviewableKind(kind: AssetKind): boolean {
-  return kind === "image" || kind === "video" || kind === "audio" || kind === "font" || kind === "json" || kind === "api" || kind === "manifest" || kind === "model" || kind === "subtitle" || kind === "css" || kind === "document";
+  return kind === "image" || kind === "video" || kind === "audio" || kind === "font" || kind === "json" || kind === "api" || kind === "manifest" || kind === "model" || kind === "subtitle" || kind === "css" || kind === "document" || kind === "archive";
 }
 
 export function isModelViewerCompatible(url: string, mime?: string): boolean {

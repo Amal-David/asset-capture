@@ -7,6 +7,7 @@ import { isBrowserDecodableImage, isModelViewerCompatible, isPreviewableKind } f
 import { parseManifest } from "../shared/manifest";
 import type { ParsedManifest } from "../shared/manifest";
 import { base64ToBytes, safeFilename } from "../shared/url";
+import { unzipSync } from "fflate";
 import "../styles/global.css";
 
 // Static class strings (not interpolated) so Tailwind keeps them at build time.
@@ -999,6 +1000,7 @@ function PreviewBody({ asset }: { asset: AssetRecord }) {
   if (asset.kind === "font") return <FontPreview url={src} asset={asset} />;
   if (asset.kind === "model") return <ModelPreview asset={asset} src={src} />;
   if (asset.kind === "document") return <PdfPreview src={src} />;
+  if (asset.kind === "archive") return <ArchivePreview src={src} asset={asset} />;
 
   return (
     <div className="flex flex-col items-center gap-2 py-8 text-center text-slate-400">
@@ -1040,11 +1042,65 @@ function usePreviewProbe(kind: "image" | "video" | "audio", src: string): "loadi
 
 function ProbedPreview({ kind, src, asset }: { kind: "image" | "video" | "audio"; src: string; asset: AssetRecord }) {
   const state = usePreviewProbe(kind, src);
+  const [dims, setDims] = useState<string | null>(null);
   if (state === "loading") return <Spinner label="Rendering…" />;
   if (state === "failed") return <FailCard asset={asset} title="Couldn't render preview" desc="The asset didn't decode in the browser. Download to inspect it." />;
-  if (kind === "image") return <img src={src} alt="Asset preview" className="max-h-[320px] max-w-full rounded object-contain" />;
+  if (kind === "image") {
+    return (
+      <div className="flex flex-col items-center gap-1">
+        <img
+          src={src}
+          alt="Asset preview"
+          className="max-h-[300px] max-w-full rounded object-contain"
+          onLoad={(e) => { const img = e.currentTarget; if (img.naturalWidth) setDims(`${img.naturalWidth} × ${img.naturalHeight}px`); }}
+        />
+        {dims && <span className="text-[11px] tabular-nums text-slate-400">{dims}</span>}
+      </div>
+    );
+  }
   if (kind === "video") return <video src={src} controls className="max-h-[320px] max-w-full rounded" preload="metadata" />;
   return <audio src={src} controls preload="metadata" className="w-full" />;
+}
+
+// List zip entries WITHOUT decompressing (fflate filter side-effect returns false),
+// so a zip bomb can't blow up memory. Reuses the existing fflate dependency.
+function ArchivePreview({ src, asset }: { src: string; asset: AssetRecord }) {
+  const [entries, setEntries] = useState<Array<{ name: string; size: number }> | null>(null);
+  const [state, setState] = useState<"loading" | "ready" | "unsupported" | "error">("loading");
+  const isZip = (asset.mime ?? "").includes("zip") || asset.extension === "zip";
+
+  useEffect(() => {
+    if (!isZip) { setState("unsupported"); return; }
+    let cancelled = false;
+    setState("loading");
+    void fetch(src).then((r) => r.arrayBuffer()).then((buf) => {
+      if (cancelled) return;
+      const list: Array<{ name: string; size: number }> = [];
+      unzipSync(new Uint8Array(buf), { filter: (file) => { list.push({ name: file.name, size: file.originalSize }); return false; } });
+      list.sort((a, b) => a.name.localeCompare(b.name));
+      setEntries(list);
+      setState("ready");
+    }).catch(() => { if (!cancelled) setState("error"); });
+    return () => { cancelled = true; };
+  }, [src, isZip]);
+
+  if (state === "loading") return <Spinner label="Reading archive…" />;
+  if (state === "unsupported") return <FailCard asset={asset} title={`${(asset.extension ?? "archive").toUpperCase()} archive`} desc="Inline listing supports .zip; download to extract this archive." />;
+  if (state === "error" || !entries) return <FailCard asset={asset} title="Couldn't read archive" desc="The archive couldn't be parsed (cross-origin or bytes not captured). Download to inspect." />;
+  return (
+    <div className="max-h-[320px] w-full overflow-auto rounded-md border border-slate-200 bg-white">
+      <div className="sticky top-0 border-b border-slate-100 bg-white px-3 py-1.5 text-xs font-medium text-slate-500">{entries.length} entr{entries.length === 1 ? "y" : "ies"}</div>
+      <ul className="divide-y divide-slate-50 text-xs">
+        {entries.slice(0, 500).map((entry) => (
+          <li key={entry.name} className="flex items-center justify-between gap-2 px-3 py-1">
+            <span className="truncate font-mono text-slate-700" title={entry.name}>{entry.name}</span>
+            <span className="shrink-0 tabular-nums text-slate-400">{formatBytes(entry.size)}</span>
+          </li>
+        ))}
+      </ul>
+      {entries.length > 500 && <div className="px-3 py-1.5 text-center text-[10px] text-slate-400">… {entries.length - 500} more</div>}
+    </div>
+  );
 }
 
 function TextPreviewLoader({ asset, objectUrl, waiting, fetchText }: { asset: AssetRecord; objectUrl: string | null; waiting: boolean; fetchText: (url: string, tabId?: number) => Promise<{ content: string; truncated: boolean; ok: boolean; status?: number } | null> }) {
