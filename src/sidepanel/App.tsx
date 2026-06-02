@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AlertTriangle, ArrowDown, ArrowUp, Box, Check, ChevronDown, Clipboard, Copy, Crosshair, Database, Download, ExternalLink, Eye, FileArchive, FileJson, FileSpreadsheet, FileText, Inbox, List, Loader2, Network, RefreshCw, ScanSearch, Search, Shield, Trash2, X, Zap } from "lucide-react";
+import { AlertTriangle, ArrowDown, ArrowUp, Box, Check, ChevronDown, Clipboard, Copy, Crosshair, Database, Download, ExternalLink, Eye, FileArchive, FileJson, FileSpreadsheet, FileText, Film, Inbox, List, Loader2, Lock, Network, RefreshCw, ScanSearch, Search, Shield, Trash2, X, Zap } from "lucide-react";
 import { useInspectorStore } from "./store";
 import type { SortDir, SortKey, StatusFilter } from "./store";
-import type { AssetKind, AssetRecord, ExportJob } from "../shared/types";
+import type { AssetKind, AssetRecord, ExportJob, MediaRecord } from "../shared/types";
 import { isBrowserDecodableImage, isModelViewerCompatible, isPreviewableKind } from "../shared/classify";
+import { parseManifest } from "../shared/manifest";
+import type { ParsedManifest } from "../shared/manifest";
 import { base64ToBytes, safeFilename } from "../shared/url";
 import "../styles/global.css";
 
@@ -98,6 +100,8 @@ export function App({ compact = false, tabId }: AppProps) {
   const assets = snapshot?.assets ?? [];
   const counts = useMemo(() => countByKind(assets), [assets]);
   const blobCount = snapshot?.blobs.length ?? 0;
+  const media = snapshot?.media ?? [];
+  const mediaCount = media.length;
   const bytesCount = useMemo(() => assets.reduce((n, a) => n + (a.bodyAvailable ? 1 : 0), 0), [assets]);
   const domains = useMemo(() => {
     const set = new Set<string>();
@@ -152,6 +156,7 @@ export function App({ compact = false, tabId }: AppProps) {
                 {assets.length} asset{assets.length === 1 ? "" : "s"}
                 {bytesCount > 0 && <span> · {bytesCount} with bytes</span>}
                 {blobCount > 0 && <span> · {blobCount} blob{blobCount === 1 ? "" : "s"}</span>}
+                {mediaCount > 0 && <span> · {mediaCount} stream{mediaCount === 1 ? "" : "s"}</span>}
                 {snapshot?.deepCaptureAttached && <span className="text-accent"> · deep</span>}
               </p>
             </div>
@@ -242,6 +247,8 @@ export function App({ compact = false, tabId }: AppProps) {
           onToggle={() => activeTabId && void toggleDeepCapture(activeTabId, !snapshot?.deepCaptureAttached)}
         />
       )}
+
+      {!compact && mediaCount > 0 && <StreamsPanel media={media} tabId={activeTabId} />}
 
       {error && (
         <div className="mx-4 mt-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{error}</div>
@@ -506,6 +513,77 @@ function ExportNotice({ job }: { job: ExportJob }) {
         Exported {job.type.toUpperCase()} · {job.fileCount} asset{job.fileCount === 1 ? "" : "s"} · {job.redactionSummary.length} redaction{job.redactionSummary.length === 1 ? "" : "s"}
         {job.failures.length > 0 && <span className="font-medium text-rose-700"> · {job.failures.length} failed</span>}
       </span>
+    </div>
+  );
+}
+
+function StreamsPanel({ media, tabId }: { media: MediaRecord[]; tabId?: number }) {
+  const [open, setOpen] = useState(true);
+  return (
+    <section className="mx-4 mt-3 overflow-hidden rounded-lg border border-slate-200 bg-surface shadow-card">
+      <button className="flex w-full items-center gap-2 px-3 py-2 text-left" onClick={() => setOpen((value) => !value)}>
+        <Film size={15} className="text-accent" />
+        <span className="text-sm font-medium">Streams</span>
+        <span className="rounded-full bg-slate-100 px-1.5 text-[10px] font-semibold text-slate-500">{media.length}</span>
+        <ChevronDown size={14} className={`ml-auto text-slate-400 transition-transform ${open ? "rotate-180" : ""}`} />
+      </button>
+      {open && (
+        <div className="divide-y divide-slate-100 border-t border-slate-200">
+          {media.map((record) => <ManifestCard key={record.id} record={record} tabId={tabId} />)}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function ManifestCard({ record, tabId }: { record: MediaRecord; tabId?: number }) {
+  const { fetchText } = useInspectorStore();
+  const [parsed, setParsed] = useState<ParsedManifest | null>(null);
+  const [state, setState] = useState<"loading" | "ready" | "error">("loading");
+  const kind = record.mediaKind === "dash" ? "dash" : "hls";
+
+  useEffect(() => {
+    if (record.mediaKind !== "hls" && record.mediaKind !== "dash") { setState("error"); return; }
+    let cancelled = false;
+    setState("loading");
+    void fetchText(record.manifestUrl, tabId).then((res) => {
+      if (cancelled) return;
+      if (!res || !res.content) { setState("error"); return; }
+      try { setParsed(parseManifest(kind, res.content)); setState("ready"); } catch { setState("error"); }
+    });
+    return () => { cancelled = true; };
+  }, [record.manifestUrl, record.mediaKind, kind, fetchText, tabId]);
+
+  const { primary } = describeUrl(record.manifestUrl);
+  return (
+    <div className="px-3 py-2.5 text-sm">
+      <div className="flex items-center gap-2">
+        <span className="shrink-0 rounded-md bg-rose-50 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-rose-700 ring-1 ring-inset ring-rose-600/20">{record.mediaKind}</span>
+        <a
+          href={record.manifestUrl}
+          onClick={(e) => { e.preventDefault(); chrome.tabs.create({ url: record.manifestUrl }); }}
+          className="min-w-0 flex-1 truncate font-mono text-xs text-accent hover:underline"
+          title={record.manifestUrl}
+        >
+          {primary}
+        </a>
+        {parsed?.drmDetected && (
+          <span className="flex shrink-0 items-center gap-1 rounded bg-amber-50 px-1.5 py-0.5 text-[10px] font-medium text-amber-700"><Lock size={10} /> DRM</span>
+        )}
+      </div>
+      {state === "loading" && <div className="mt-1 text-xs text-slate-400">Parsing manifest…</div>}
+      {state === "error" && <div className="mt-1 text-xs text-slate-400">Couldn't read manifest (cross-origin or offline).</div>}
+      {state === "ready" && parsed && (
+        <div className="mt-1.5 space-y-0.5 text-xs text-slate-500">
+          {parsed.resolutions.length > 0 && <div><span className="text-slate-400">Resolutions:</span> {parsed.resolutions.join(", ")}</div>}
+          {parsed.codecs.length > 0 && <div className="truncate"><span className="text-slate-400">Codecs:</span> {parsed.codecs.join(", ")}</div>}
+          {parsed.variants.length > 0 && <div><span className="text-slate-400">Variants:</span> {parsed.variants.length}</div>}
+          {parsed.segmentCount != null && <div><span className="text-slate-400">Segments:</span> {parsed.segmentCount}</div>}
+          {parsed.variants.length === 0 && parsed.resolutions.length === 0 && parsed.segmentCount == null && (
+            <div className="text-slate-400">Media playlist (no variant info).</div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
