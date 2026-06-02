@@ -44,6 +44,7 @@ interface InspectorState {
   toggleSortDir: () => void;
   resetFilters: () => void;
   refresh: (tabId?: number) => Promise<void>;
+  rescan: (tabId?: number) => Promise<void>;
   clear: (tabId?: number) => Promise<void>;
   exportAs: (type: ExportJob["type"], tabId?: number, selectedIds?: string[]) => Promise<void>;
   toggleDeepCapture: (tabId: number, enabled: boolean) => Promise<void>;
@@ -107,6 +108,14 @@ export const useInspectorStore = create<InspectorState>((set, get) => ({
     } else {
       set({ error: response.ok ? "Unexpected response" : response.error, loading: false });
     }
+  },
+  rescan: async (tabId) => {
+    const response = await sendMessage({ type: "RESCAN", tabId });
+    if (!response.ok) {
+      set({ error: response.error });
+      return;
+    }
+    await get().refresh(tabId);
   },
   clear: async (tabId) => {
     const response = await sendMessage({ type: "CLEAR_SESSION", tabId });

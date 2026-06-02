@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowDown, ArrowUp, Box, Check, ChevronDown, Clipboard, Copy, Crosshair, Database, Download, ExternalLink, Eye, FileArchive, FileJson, FileSpreadsheet, FileText, Inbox, List, Network, RefreshCw, Search, Shield, Trash2, X, Zap } from "lucide-react";
+import { ArrowDown, ArrowUp, Box, Check, ChevronDown, Clipboard, Copy, Crosshair, Database, Download, ExternalLink, Eye, FileArchive, FileJson, FileSpreadsheet, FileText, Inbox, List, Network, RefreshCw, ScanSearch, Search, Shield, Trash2, X, Zap } from "lucide-react";
 import { useInspectorStore } from "./store";
 import type { SortDir, SortKey, StatusFilter } from "./store";
 import type { AssetKind, AssetRecord, ExportJob } from "../shared/types";
@@ -53,7 +53,7 @@ export function App({ compact = false, tabId }: AppProps) {
     lastExport, pickerActive, pickerResult,
     toggleKind, clearKinds, setQuery, setStatusFilter, toggleOnlyWithBytes, toggleOnlyPreviewable, setDomain, setSortKey, toggleSortDir, resetFilters,
     toggleSelect, selectMany, clearSelection,
-    refresh, clear, exportAs, toggleDeepCapture, downloadAsset, activatePicker, deactivatePicker, clearPickerResult
+    refresh, rescan, clear, exportAs, toggleDeepCapture, downloadAsset, activatePicker, deactivatePicker, clearPickerResult
   } = useInspectorStore();
 
   useEffect(() => {
@@ -172,6 +172,11 @@ export function App({ compact = false, tabId }: AppProps) {
               </IconButton>
             )}
             <ExportMenu onExport={exportAs} tabId={activeTabId} disabled={!assets.length} />
+            {!compact && (
+              <IconButton title="Rescan page (re-walk DOM, shadow roots & stylesheets)" onClick={() => void rescan(activeTabId)} disabled={!activeTabId}>
+                <ScanSearch size={16} />
+              </IconButton>
+            )}
             <IconButton title="Refresh" onClick={() => void refresh(activeTabId)}>
               <RefreshCw size={16} className={loading ? "animate-spin" : ""} />
             </IconButton>

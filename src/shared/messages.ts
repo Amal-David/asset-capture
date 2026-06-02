@@ -20,6 +20,7 @@ export type RuntimeMessage =
     }
   | { type: "GET_SNAPSHOT"; tabId?: number }
   | { type: "CLEAR_SESSION"; tabId?: number }
+  | { type: "RESCAN"; tabId?: number }
   | { type: "EXPORT"; exportType: "json" | "csv" | "url-list" | "har" | "zip"; tabId?: number; selectedIds?: string[] }
   | { type: "TOGGLE_DEEP_CAPTURE"; tabId: number; enabled: boolean }
   | { type: "ASSET_BODY"; key: string; mime?: string; base64: string; pageUrl: string }

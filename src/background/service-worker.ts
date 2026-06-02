@@ -120,6 +120,16 @@ async function handleMessage(message: RuntimeMessage, sender: chrome.runtime.Mes
     return { ok: true };
   }
 
+  if (message.type === "RESCAN") {
+    if (!tabId) return { ok: false, error: "No active tab to rescan." };
+    try {
+      await chrome.tabs.sendMessage(tabId, { type: "PAGE_RESCAN" });
+    } catch {
+      return { ok: false, error: "Can't rescan this page (no content script — e.g. chrome:// or Web Store)." };
+    }
+    return { ok: true };
+  }
+
   if (message.type === "DOM_ASSET_BATCH") {
     await Promise.all(message.assets.map((asset) => upsertAssetFromPartial(asset, tabId, sender.frameId, message.pageUrl)));
     await Promise.all((message.media ?? []).map((media) => upsertMedia(media, tabId, sender.frameId)));
