@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Box, Check, ChevronDown, Clipboard, Copy, Crosshair, Download, ExternalLink, Eye, FileArchive, FileJson, FileSpreadsheet, FileText, Inbox, List, Network, RefreshCw, Search, Shield, Trash2, X, Zap } from "lucide-react";
+import { ArrowDown, ArrowUp, Box, Check, ChevronDown, Clipboard, Copy, Crosshair, Database, Download, ExternalLink, Eye, FileArchive, FileJson, FileSpreadsheet, FileText, Inbox, List, Network, RefreshCw, Search, Shield, Trash2, X, Zap } from "lucide-react";
 import { useInspectorStore } from "./store";
+import type { SortDir, SortKey, StatusFilter } from "./store";
 import type { AssetKind, AssetRecord, ExportJob } from "../shared/types";
 import { isModelViewerCompatible, isPreviewableKind } from "../shared/classify";
 import { safeFilename } from "../shared/url";
@@ -47,7 +48,12 @@ export function App({ compact = false, tabId }: AppProps) {
     setSelectedAsset(asset);
     setMenu({ x: event.clientX, y: event.clientY, asset });
   }, []);
-  const { snapshot, loading, error, filter, query, lastExport, pickerActive, pickerResult, setFilter, setQuery, refresh, clear, exportAs, toggleDeepCapture, activatePicker, deactivatePicker, clearPickerResult } = useInspectorStore();
+  const {
+    snapshot, loading, error, kinds, query, statusFilter, onlyWithBytes, onlyPreviewable, domain, sortKey, sortDir,
+    lastExport, pickerActive, pickerResult,
+    toggleKind, clearKinds, setQuery, setStatusFilter, toggleOnlyWithBytes, toggleOnlyPreviewable, setDomain, setSortKey, toggleSortDir, resetFilters,
+    refresh, clear, exportAs, toggleDeepCapture, activatePicker, deactivatePicker, clearPickerResult
+  } = useInspectorStore();
 
   useEffect(() => {
     if (tabId) {
@@ -80,26 +86,49 @@ export function App({ compact = false, tabId }: AppProps) {
       } catch { /* ignore */ }
     }
     if (match) {
-      setFilter("all");
-      setQuery("");
+      resetFilters();
       setSelectedAsset(match);
       setFlashAssetId(match.id);
       setTimeout(() => setFlashAssetId(null), 1200);
     }
     clearPickerResult();
-  }, [pickerResult, snapshot?.assets, clearPickerResult, setFilter, setQuery]);
+  }, [pickerResult, snapshot?.assets, clearPickerResult, resetFilters]);
 
   const assets = snapshot?.assets ?? [];
   const counts = useMemo(() => countByKind(assets), [assets]);
   const blobCount = snapshot?.blobs.length ?? 0;
+  const bytesCount = useMemo(() => assets.reduce((n, a) => n + (a.bodyAvailable ? 1 : 0), 0), [assets]);
+  const domains = useMemo(() => {
+    const set = new Set<string>();
+    for (const a of assets) {
+      const host = hostOf(a.url);
+      if (host) set.add(host);
+    }
+    return Array.from(set).sort();
+  }, [assets]);
+
   const filtered = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
     return assets.filter((asset) => {
-      const kindMatch = filter === "all" || asset.kind === filter;
-      const queryMatch = !normalizedQuery || asset.url.toLowerCase().includes(normalizedQuery) || asset.mime?.toLowerCase().includes(normalizedQuery);
-      return kindMatch && queryMatch;
+      if (kinds.size && !kinds.has(asset.kind)) return false;
+      if (onlyWithBytes && !asset.bodyAvailable) return false;
+      if (onlyPreviewable && !isPreviewableKind(asset.kind)) return false;
+      if (statusFilter !== "all" && statusClass(asset.status) !== statusFilter) return false;
+      if (domain && hostOf(asset.url) !== domain) return false;
+      if (normalizedQuery) {
+        const haystack = `${asset.url} ${asset.mime ?? ""} ${asset.sources.join(" ")}`.toLowerCase();
+        if (!haystack.includes(normalizedQuery)) return false;
+      }
+      return true;
     });
-  }, [assets, filter, query]);
+  }, [assets, kinds, query, statusFilter, onlyWithBytes, onlyPreviewable, domain]);
+
+  // Sort client-side so the periodic refresh (which only bumps updatedAt) can't
+  // reshuffle rows under the user. Missing size/status always sort last.
+  const sorted = useMemo(() => {
+    const dir = sortDir === "asc" ? 1 : -1;
+    return [...filtered].sort((a, b) => compareAssets(a, b, sortKey, dir));
+  }, [filtered, sortKey, sortDir]);
 
   // Keep the selected asset's data fresh as the snapshot refreshes (e.g. bytes
   // arrive after metadata) without losing the open drawer.
@@ -120,6 +149,7 @@ export function App({ compact = false, tabId }: AppProps) {
               <h1 className="truncate text-sm font-semibold leading-tight">Asset Inspector</h1>
               <p className="truncate text-xs text-slate-500">
                 {assets.length} asset{assets.length === 1 ? "" : "s"}
+                {bytesCount > 0 && <span> · {bytesCount} with bytes</span>}
                 {blobCount > 0 && <span> · {blobCount} blob{blobCount === 1 ? "" : "s"}</span>}
                 {snapshot?.deepCaptureAttached && <span className="text-accent"> · deep</span>}
               </p>
@@ -170,13 +200,33 @@ export function App({ compact = false, tabId }: AppProps) {
         </div>
 
         <div className="mt-2.5 flex gap-1.5 overflow-x-auto pb-0.5">
-          <Chip label="All" count={assets.length} active={filter === "all"} onClick={() => setFilter("all")} />
+          <Chip label="All" count={assets.length} active={kinds.size === 0} onClick={clearKinds} />
           {(Object.keys(counts) as AssetKind[])
             .sort((a, b) => counts[b] - counts[a])
             .map((kind) => (
-              <Chip key={kind} label={kind} count={counts[kind]} active={filter === kind} onClick={() => setFilter(kind)} />
+              <Chip key={kind} label={kind} count={counts[kind]} active={kinds.has(kind)} onClick={() => toggleKind(kind)} />
             ))}
         </div>
+
+        <FilterControls
+          compact={compact}
+          sortKey={sortKey}
+          sortDir={sortDir}
+          setSortKey={setSortKey}
+          toggleSortDir={toggleSortDir}
+          statusFilter={statusFilter}
+          setStatusFilter={setStatusFilter}
+          onlyWithBytes={onlyWithBytes}
+          toggleOnlyWithBytes={toggleOnlyWithBytes}
+          onlyPreviewable={onlyPreviewable}
+          toggleOnlyPreviewable={toggleOnlyPreviewable}
+          domain={domain}
+          domains={domains}
+          setDomain={setDomain}
+          showing={sorted.length}
+          total={assets.length}
+          onReset={resetFilters}
+        />
       </div>
 
       {!compact && (
@@ -194,7 +244,7 @@ export function App({ compact = false, tabId }: AppProps) {
 
       <div className="min-h-0 flex-1 overflow-y-auto">
         <AssetList
-          assets={compact ? filtered.slice(0, 50) : filtered}
+          assets={compact ? sorted.slice(0, 50) : sorted}
           loading={loading}
           hasAssets={assets.length > 0}
           onSelect={setSelectedAsset}
@@ -238,6 +288,110 @@ function Chip({ label, count, active, onClick }: { label: string; count: number;
     >
       {label}
       <span className={`rounded-full px-1.5 text-[10px] font-semibold tabular-nums ${active ? "bg-white/25 text-white" : "bg-slate-100 text-slate-500"}`}>{count}</span>
+    </button>
+  );
+}
+
+const SORT_OPTIONS: Array<{ key: SortKey; label: string }> = [
+  { key: "updatedAt", label: "Last seen" },
+  { key: "createdAt", label: "First seen" },
+  { key: "size", label: "Size" },
+  { key: "status", label: "Status" },
+  { key: "name", label: "Name" },
+  { key: "kind", label: "Type" }
+];
+
+const STATUS_OPTIONS: Array<{ key: StatusFilter; label: string }> = [
+  { key: "all", label: "Any status" },
+  { key: "ok", label: "2xx OK" },
+  { key: "redirect", label: "3xx" },
+  { key: "client-error", label: "4xx" },
+  { key: "server-error", label: "5xx" },
+  { key: "no-status", label: "No status" }
+];
+
+function FilterControls({
+  compact, sortKey, sortDir, setSortKey, toggleSortDir, statusFilter, setStatusFilter,
+  onlyWithBytes, toggleOnlyWithBytes, onlyPreviewable, toggleOnlyPreviewable, domain, domains, setDomain, showing, total, onReset
+}: {
+  compact: boolean;
+  sortKey: SortKey;
+  sortDir: SortDir;
+  setSortKey: (key: SortKey) => void;
+  toggleSortDir: () => void;
+  statusFilter: StatusFilter;
+  setStatusFilter: (status: StatusFilter) => void;
+  onlyWithBytes: boolean;
+  toggleOnlyWithBytes: () => void;
+  onlyPreviewable: boolean;
+  toggleOnlyPreviewable: () => void;
+  domain?: string;
+  domains: string[];
+  setDomain: (domain?: string) => void;
+  showing: number;
+  total: number;
+  onReset: () => void;
+}) {
+  const selectClass = "rounded-md border border-slate-200 bg-white py-1 pl-2 pr-6 text-xs text-slate-600 outline-none focus:border-accent";
+  const filtersActive = showing !== total || statusFilter !== "all" || onlyWithBytes || onlyPreviewable || Boolean(domain);
+  return (
+    <div className="mt-2 flex flex-wrap items-center gap-1.5 text-xs">
+      <div className="flex items-center gap-1">
+        <select className={selectClass} value={sortKey} onChange={(e) => setSortKey(e.target.value as SortKey)} title="Sort by">
+          {SORT_OPTIONS.map((option) => (
+            <option key={option.key} value={option.key}>Sort: {option.label}</option>
+          ))}
+        </select>
+        <button
+          className="rounded-md border border-slate-200 bg-white p-1 text-slate-500 hover:bg-slate-50"
+          title={sortDir === "asc" ? "Ascending" : "Descending"}
+          onClick={toggleSortDir}
+        >
+          {sortDir === "asc" ? <ArrowUp size={14} /> : <ArrowDown size={14} />}
+        </button>
+      </div>
+
+      <select className={selectClass} value={statusFilter} onChange={(e) => setStatusFilter(e.target.value as StatusFilter)} title="Filter by status">
+        {STATUS_OPTIONS.map((option) => (
+          <option key={option.key} value={option.key}>{option.label}</option>
+        ))}
+      </select>
+
+      <ToggleChip active={onlyWithBytes} onClick={toggleOnlyWithBytes} icon={<Database size={12} />} label="Bytes" title="Only assets with captured bytes" />
+      <ToggleChip active={onlyPreviewable} onClick={toggleOnlyPreviewable} icon={<Eye size={12} />} label="Previewable" title="Only previewable kinds" />
+
+      {!compact && domains.length > 1 && (
+        <select className={`${selectClass} max-w-[160px]`} value={domain ?? ""} onChange={(e) => setDomain(e.target.value || undefined)} title="Filter by domain">
+          <option value="">All domains</option>
+          {domains.map((host) => (
+            <option key={host} value={host}>{host}</option>
+          ))}
+        </select>
+      )}
+
+      <span className="ml-auto flex items-center gap-2 text-slate-400">
+        <span className="tabular-nums">{showing === total ? `${total}` : `${showing} / ${total}`}</span>
+        {filtersActive && (
+          <button className="rounded-md px-1.5 py-0.5 text-slate-500 hover:bg-slate-100 hover:text-slate-700" onClick={onReset} title="Reset filters">
+            Reset
+          </button>
+        )}
+      </span>
+    </div>
+  );
+}
+
+function ToggleChip({ active, onClick, icon, label, title }: { active: boolean; onClick: () => void; icon: React.ReactNode; label: string; title: string }) {
+  return (
+    <button
+      onClick={onClick}
+      title={title}
+      className={`flex items-center gap-1 rounded-md border px-2 py-1 font-medium transition-colors ${
+        active ? "border-accent bg-accent-soft text-accent" : "border-slate-200 bg-white text-slate-500 hover:bg-slate-50"
+      }`}
+    >
+      {icon}
+      {label}
     </button>
   );
 }
@@ -709,6 +863,49 @@ function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function hostOf(url: string): string | undefined {
+  try {
+    return new URL(url).hostname || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function statusClass(status?: number): StatusFilter {
+  if (status == null) return "no-status";
+  if (status >= 200 && status < 300) return "ok";
+  if (status >= 300 && status < 400) return "redirect";
+  if (status >= 400 && status < 500) return "client-error";
+  if (status >= 500) return "server-error";
+  return "no-status";
+}
+
+// Comparator with missing values always sorting last (regardless of direction),
+// so e.g. sorting by size doesn't float a wall of unknown-size rows to the top.
+function compareAssets(a: AssetRecord, b: AssetRecord, key: SortKey, dir: number): number {
+  const av = sortValue(a, key);
+  const bv = sortValue(b, key);
+  const aMissing = av === undefined || av === "";
+  const bMissing = bv === undefined || bv === "";
+  if (aMissing && bMissing) return 0;
+  if (aMissing) return 1;
+  if (bMissing) return -1;
+  if (typeof av === "string" && typeof bv === "string") return dir * av.localeCompare(bv);
+  return dir * (Number(av) - Number(bv));
+}
+
+function sortValue(asset: AssetRecord, key: SortKey): string | number | undefined {
+  switch (key) {
+    case "size": return asset.size;
+    case "status": return asset.status;
+    case "name": return describeUrl(asset.url).primary.toLowerCase();
+    case "kind": return asset.kind;
+    case "createdAt": return asset.createdAt;
+    case "updatedAt":
+    default: return asset.updatedAt;
+  }
 }
 
 function countByKind(assets: AssetRecord[]): Record<AssetKind, number> {

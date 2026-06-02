@@ -3,20 +3,43 @@ import { sendMessage } from "../shared/messages";
 import type { PickerResult } from "../shared/messages";
 import type { AssetKind, ExportJob, SessionSnapshot } from "../shared/types";
 
+export type SortKey = "updatedAt" | "createdAt" | "size" | "status" | "name" | "kind";
+export type SortDir = "asc" | "desc";
+export type StatusFilter = "all" | "ok" | "redirect" | "client-error" | "server-error" | "no-status";
+
 interface InspectorState {
   snapshot?: SessionSnapshot;
   loading: boolean;
   error?: string;
-  filter: AssetKind | "all";
+  // Filtering: an empty kinds set means "all kinds". Multi-select lets the user
+  // see e.g. image+video+audio at once instead of cycling single views.
+  kinds: Set<AssetKind>;
   query: string;
+  statusFilter: StatusFilter;
+  onlyWithBytes: boolean;
+  onlyPreviewable: boolean;
+  domain?: string;
+  // Sorting is client-side so the 1.5s refresh poll can't reshuffle rows under
+  // the user mid-scroll (the DB only ever orders by updatedAt).
+  sortKey: SortKey;
+  sortDir: SortDir;
   lastExport?: ExportJob;
   pickerActive: boolean;
   pickerResult?: PickerResult;
-  setFilter: (filter: AssetKind | "all") => void;
+  toggleKind: (kind: AssetKind) => void;
+  clearKinds: () => void;
   setQuery: (query: string) => void;
+  setStatusFilter: (status: StatusFilter) => void;
+  toggleOnlyWithBytes: () => void;
+  toggleOnlyPreviewable: () => void;
+  setDomain: (domain?: string) => void;
+  setSortKey: (key: SortKey) => void;
+  setSortDir: (dir: SortDir) => void;
+  toggleSortDir: () => void;
+  resetFilters: () => void;
   refresh: (tabId?: number) => Promise<void>;
   clear: (tabId?: number) => Promise<void>;
-  exportAs: (type: ExportJob["type"], tabId?: number) => Promise<void>;
+  exportAs: (type: ExportJob["type"], tabId?: number, selectedIds?: string[]) => Promise<void>;
   toggleDeepCapture: (tabId: number, enabled: boolean) => Promise<void>;
   downloadAsset: (url: string, filename?: string, assetId?: string) => Promise<void>;
   getAssetBody: (assetId: string) => Promise<{ mime: string; dataUrl: string } | null>;
@@ -27,11 +50,31 @@ interface InspectorState {
 
 export const useInspectorStore = create<InspectorState>((set, get) => ({
   loading: false,
-  filter: "all",
+  kinds: new Set<AssetKind>(),
   query: "",
+  statusFilter: "all",
+  onlyWithBytes: false,
+  onlyPreviewable: false,
+  sortKey: "updatedAt",
+  sortDir: "desc",
   pickerActive: false,
-  setFilter: (filter) => set({ filter }),
+  toggleKind: (kind) =>
+    set((state) => {
+      const kinds = new Set(state.kinds);
+      if (kinds.has(kind)) kinds.delete(kind);
+      else kinds.add(kind);
+      return { kinds };
+    }),
+  clearKinds: () => set({ kinds: new Set<AssetKind>() }),
   setQuery: (query) => set({ query }),
+  setStatusFilter: (statusFilter) => set({ statusFilter }),
+  toggleOnlyWithBytes: () => set((state) => ({ onlyWithBytes: !state.onlyWithBytes })),
+  toggleOnlyPreviewable: () => set((state) => ({ onlyPreviewable: !state.onlyPreviewable })),
+  setDomain: (domain) => set({ domain }),
+  setSortKey: (sortKey) => set({ sortKey }),
+  setSortDir: (sortDir) => set({ sortDir }),
+  toggleSortDir: () => set((state) => ({ sortDir: state.sortDir === "asc" ? "desc" : "asc" })),
+  resetFilters: () => set({ kinds: new Set<AssetKind>(), query: "", statusFilter: "all", onlyWithBytes: false, onlyPreviewable: false, domain: undefined }),
   refresh: async (tabId) => {
     set({ loading: true, error: undefined });
     const response = await sendMessage({ type: "GET_SNAPSHOT", tabId });
@@ -57,9 +100,9 @@ export const useInspectorStore = create<InspectorState>((set, get) => ({
     }
     await get().refresh(tabId);
   },
-  exportAs: async (type, tabId) => {
+  exportAs: async (type, tabId, selectedIds) => {
     set({ loading: true, error: undefined });
-    const response = await sendMessage({ type: "EXPORT", exportType: type, tabId });
+    const response = await sendMessage({ type: "EXPORT", exportType: type, tabId, selectedIds });
     if (response.ok && "export" in response) {
       set({ lastExport: response.export.job, loading: false });
     } else {
