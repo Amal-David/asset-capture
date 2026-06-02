@@ -4,7 +4,7 @@ import { clearSession, db, getSnapshot, sessionIdForTab } from "../shared/db";
 import type { PickerResult, RuntimeMessage, RuntimeResponse } from "../shared/messages";
 import type { AssetRecord, BlobRecord, CaptureSource, MediaRecord, RequestEvent } from "../shared/types";
 import { base64ToBytes, getExtension, inferFrameOrigin, stableId } from "../shared/url";
-import { isTextLikeMime, redactTextContent } from "../shared/redact";
+import { isTextLikeMime, redactHeaders, redactTextContent } from "../shared/redact";
 
 const requestStarts = new Map<string, number>();
 const deepCaptureTabs = new Set<number>();
@@ -87,6 +87,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   deepCaptureTabs.delete(tabId);
   pickerActiveTabs.delete(tabId);
   pendingPickerResults.delete(tabId);
+  requestWriteCounts.delete(sessionIdForTab(tabId));
   void clearSession(tabId);
 });
 
@@ -522,15 +523,41 @@ async function recordRequest(
     url: details.url,
     method: "method" in details ? details.method : undefined,
     status: details.statusCode,
-    requestHeaders: headerArrayToRecord(details.requestHeaders),
-    responseHeaders: headerArrayToRecord(details.responseHeaders),
+    // Redact headers at rest so the requests store never holds raw Authorization/
+    // Cookie values (consistent with body redaction). HAR's redact pass is idempotent.
+    requestHeaders: redactHeaders(headerArrayToRecord(details.requestHeaders)).value,
+    responseHeaders: redactHeaders(headerArrayToRecord(details.responseHeaders)).value,
     mime: getHeader(details.responseHeaders, "content-type"),
     resourceType: "type" in details ? details.type : undefined,
     errorText: "error" in details ? details.error : undefined,
     initiator: "initiator" in details ? details.initiator : undefined,
     timestamp: details.timeStamp
   };
-  await db.requests.put(event);
+  try {
+    await db.requests.put(event);
+  } catch {
+    // Quota/storage failure must not surface as an unhandled rejection.
+    return;
+  }
+  // Bound the per-session request log so a long-lived tab can't grow it without limit
+  // (throttled so we don't count on every write).
+  const writes = (requestWriteCounts.get(sessionId) ?? 0) + 1;
+  requestWriteCounts.set(sessionId, writes);
+  if (writes % 256 === 0) void pruneRequests(sessionId);
+}
+
+const MAX_REQUESTS_PER_SESSION = 5000;
+const requestWriteCounts = new Map<string, number>();
+
+async function pruneRequests(sessionId: string): Promise<void> {
+  try {
+    const count = await db.requests.where("sessionId").equals(sessionId).count();
+    if (count <= MAX_REQUESTS_PER_SESSION) return;
+    const oldest = await db.requests.where("sessionId").equals(sessionId).sortBy("timestamp");
+    await db.requests.bulkDelete(oldest.slice(0, count - MAX_REQUESTS_PER_SESSION).map((event) => event.id));
+  } catch {
+    // Best-effort; never block capture.
+  }
 }
 
 async function upsertAssetFromRequest(
