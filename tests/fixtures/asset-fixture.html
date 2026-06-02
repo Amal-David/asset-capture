@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Asset Fixture</title>
+    <link rel="stylesheet" href="/style.css" />
+    <link rel="preload" href="/font.woff2" as="font" />
+  </head>
+  <body>
+    <img src="/hero.webp" srcset="/hero-small.webp 480w, /hero.webp 960w" />
+    <video src="/intro.mp4" poster="/poster.jpg"></video>
+    <script>
+      fetch("/api/assets.json");
+      const blob = new Blob(["hello"], { type: "text/plain" });
+      URL.createObjectURL(blob);
+    </script>
+  </body>
+</html>
