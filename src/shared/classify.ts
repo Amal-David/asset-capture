@@ -131,13 +131,23 @@ export function classifyAsset(input: ClassificationInput): AssetKind {
   if (extension && EXTENSION_KIND[extension]) return EXTENSION_KIND[extension];
   if (input.sources?.includes("fetch") || input.sources?.includes("xhr")) return "api";
   if (input.url.startsWith("data:")) return classifyDataUrl(input.url);
-  if (input.url.startsWith("blob:")) return mime ? classifyAsset({ url: input.url, mime }) : "binary";
+  if (input.url.startsWith("blob:")) return classifyByMime(mime);
   return "unknown";
 }
 
 function classifyDataUrl(url: string): AssetKind {
   const mime = /^data:([^;,]+)/i.exec(url)?.[1];
-  return classifyAsset({ url, mime });
+  return classifyByMime(mime);
+}
+
+// Classify a browser-local URL (data:/blob:) by MIME only. Crucially it passes
+// an empty url so the recursive call cannot re-enter the data:/blob: branches —
+// a truthy-but-unrecognized MIME (e.g. text/html on a data: iframe) otherwise
+// recursed forever and crashed the service worker.
+function classifyByMime(mime?: string): AssetKind {
+  if (!mime) return "binary";
+  const kind = classifyAsset({ url: "", mime });
+  return kind === "unknown" ? "binary" : kind;
 }
 
 export function isPreviewableKind(kind: AssetKind): boolean {

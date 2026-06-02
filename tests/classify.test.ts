@@ -61,6 +61,20 @@ describe("classifyAsset", () => {
     expect(classifyAsset({ url: "https://cdn.example.com/track.aac" })).toBe("audio");
     expect(classifyAsset({ url: "https://cdn.example.com/song.midi" })).toBe("audio");
   });
+
+  it("classifies recognized data: and blob: URLs by MIME", () => {
+    expect(classifyAsset({ url: "data:image/png;base64,AAAA" })).toBe("image");
+    expect(classifyAsset({ url: "blob:https://app.example.com/abc", mime: "video/mp4" })).toBe("video");
+  });
+
+  it("terminates (no infinite recursion) on data:/blob: URLs with unrecognized MIME", () => {
+    // Regression: a truthy-but-unrecognized MIME used to re-enter the data:/blob:
+    // branch forever and overflow the stack, crashing the service worker.
+    expect(classifyAsset({ url: "data:text/html,<p>hi</p>" })).toBe("binary");
+    expect(classifyAsset({ url: "data:application/pdf;base64,AAAA" })).toBe("binary");
+    expect(classifyAsset({ url: "blob:https://app.example.com/xyz", mime: "text/html" })).toBe("binary");
+    expect(classifyAsset({ url: "blob:https://app.example.com/xyz" })).toBe("binary");
+  });
 });
 
 describe("isModelViewerCompatible", () => {

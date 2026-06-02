@@ -1,5 +1,5 @@
 import type { PageHookEvent, RuntimeMessage } from "../shared/messages";
-import { bytesToBase64, normalizeUrl, stableId } from "../shared/url";
+import { bytesToBase64, normalizeUrl } from "../shared/url";
 import type { AssetRecord, CaptureSource, MediaRecord } from "../shared/types";
 import { cssSelector, extractCssUrls, parseSrcset } from "./asset-detection";
 import { activatePicker, deactivatePicker } from "./element-picker";
@@ -177,7 +177,8 @@ function collectElementAssets(
 function assetFromPerformanceEntry(entry: PerformanceResourceTiming): (Partial<AssetRecord> & Pick<AssetRecord, "url" | "sources">) | undefined {
   if (!entry.name) return undefined;
   return {
-    id: `asset-${stableId(`${location.href}:${entry.name}`)}`,
+    // No id here: the service worker derives the canonical asset id from
+    // sessionId(`tab-<id>`):url so DOM/performance and network captures merge.
     url: normalizeUrl(entry.name, location.href),
     sources: ["performance"],
     size: entry.transferSize || entry.encodedBodySize || undefined,
@@ -192,7 +193,8 @@ function assetFromPerformanceEntry(entry: PerformanceResourceTiming): (Partial<A
 
 function assetFromUrl(url: string, source: CaptureSource, selector?: string): Partial<AssetRecord> & Pick<AssetRecord, "url" | "sources"> {
   return {
-    id: `asset-${stableId(`${location.href}:${url}`)}`,
+    // No id: the service worker keys assets by sessionId:url (see above), so
+    // leaving it unset lets DOM-scanned assets merge with webRequest/body records.
     url,
     sources: [source],
     domReferences: selector ? [selector] : undefined,

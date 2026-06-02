@@ -36,8 +36,10 @@ export function extractCssUrls(style: string, baseUrl: string): string[] {
 export function cssSelector(element: Element): string {
   if (element.id) return `#${CSS.escape(element.id)}`;
   const tag = element.tagName.toLowerCase();
-  const testId = element.getAttribute("data-testid") || element.getAttribute("data-test");
+  const testId = element.getAttribute("data-testid");
   if (testId) return `${tag}[data-testid="${CSS.escape(testId)}"]`;
+  const testAttr = element.getAttribute("data-test");
+  if (testAttr) return `${tag}[data-test="${CSS.escape(testAttr)}"]`;
   const parent = element.parentElement;
   if (!parent) return tag;
   const index = Array.from(parent.children).indexOf(element) + 1;
