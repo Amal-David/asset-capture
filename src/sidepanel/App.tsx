@@ -49,10 +49,11 @@ export function App({ compact = false, tabId }: AppProps) {
     setMenu({ x: event.clientX, y: event.clientY, asset });
   }, []);
   const {
-    snapshot, loading, error, kinds, query, statusFilter, onlyWithBytes, onlyPreviewable, domain, sortKey, sortDir,
+    snapshot, loading, error, kinds, query, statusFilter, onlyWithBytes, onlyPreviewable, domain, sortKey, sortDir, selectedIds,
     lastExport, pickerActive, pickerResult,
     toggleKind, clearKinds, setQuery, setStatusFilter, toggleOnlyWithBytes, toggleOnlyPreviewable, setDomain, setSortKey, toggleSortDir, resetFilters,
-    refresh, clear, exportAs, toggleDeepCapture, activatePicker, deactivatePicker, clearPickerResult
+    toggleSelect, selectMany, clearSelection,
+    refresh, clear, exportAs, toggleDeepCapture, downloadAsset, activatePicker, deactivatePicker, clearPickerResult
   } = useInspectorStore();
 
   useEffect(() => {
@@ -242,15 +243,36 @@ export function App({ compact = false, tabId }: AppProps) {
       )}
       {lastExport && <ExportNotice job={lastExport} />}
 
+      {selectedIds.size > 0 && (
+        <BulkBar
+          count={selectedIds.size}
+          onSelectAll={() => selectMany(sorted.map((a) => a.id))}
+          onClear={clearSelection}
+          onCopyUrls={() => {
+            const urls = sorted.filter((a) => selectedIds.has(a.id)).map((a) => a.url).join("\n");
+            void navigator.clipboard.writeText(urls);
+          }}
+          onDownload={() => {
+            for (const asset of sorted.filter((a) => selectedIds.has(a.id))) {
+              void downloadAsset(asset.url, safeFilename(asset.url, asset.id), asset.id);
+            }
+          }}
+          onExportZip={() => void exportAs("zip", activeTabId, [...selectedIds])}
+        />
+      )}
+
       <div className="min-h-0 flex-1 overflow-y-auto">
         <AssetList
-          assets={compact ? sorted.slice(0, 50) : sorted}
+          assets={sorted}
+          compact={compact}
           loading={loading}
           hasAssets={assets.length > 0}
           onSelect={setSelectedAsset}
           onContextMenu={openMenu}
           selectedId={liveSelected?.id}
           flashId={flashAssetId}
+          selectedIds={selectedIds}
+          onToggleSelect={toggleSelect}
         />
       </div>
 
@@ -483,10 +505,79 @@ function ExportNotice({ job }: { job: ExportJob }) {
   );
 }
 
-function AssetList({ assets, loading, hasAssets, onSelect, onContextMenu, selectedId, flashId }: { assets: AssetRecord[]; loading: boolean; hasAssets: boolean; onSelect: (asset: AssetRecord) => void; onContextMenu: (event: React.MouseEvent, asset: AssetRecord) => void; selectedId?: string; flashId?: string | null }) {
-  const flashRef = useCallback((node: HTMLButtonElement | null) => {
+const POPUP_CAP = 50;
+const WINDOW_STEP = 200;
+
+function BulkBar({ count, onSelectAll, onClear, onCopyUrls, onDownload, onExportZip }: { count: number; onSelectAll: () => void; onClear: () => void; onCopyUrls: () => void; onDownload: () => void; onExportZip: () => void }) {
+  return (
+    <div className="mx-4 mt-3 flex flex-wrap items-center gap-2 rounded-lg border border-accent/30 bg-accent-soft px-3 py-2 text-sm">
+      <span className="font-medium text-teal-900">{count} selected</span>
+      <div className="ml-auto flex flex-wrap items-center gap-1.5">
+        <BulkButton icon={<Download size={14} />} label="Download" onClick={onDownload} />
+        <BulkButton icon={<Copy size={14} />} label="Copy URLs" onClick={onCopyUrls} />
+        <BulkButton icon={<FileArchive size={14} />} label="Export ZIP" onClick={onExportZip} />
+        <button className="rounded-md px-2 py-1 text-xs text-teal-800 hover:bg-white/60" onClick={onSelectAll}>Select all</button>
+        <button className="rounded-md px-2 py-1 text-xs text-teal-800 hover:bg-white/60" onClick={onClear}>Clear</button>
+      </div>
+    </div>
+  );
+}
+
+function BulkButton({ icon, label, onClick }: { icon: React.ReactNode; label: string; onClick: () => void }) {
+  return (
+    <button className="flex items-center gap-1 rounded-md bg-white px-2 py-1 text-xs font-medium text-teal-800 shadow-sm hover:bg-white/80" onClick={onClick}>
+      {icon}
+      {label}
+    </button>
+  );
+}
+
+function AssetList({ assets, compact, loading, hasAssets, onSelect, onContextMenu, selectedId, flashId, selectedIds, onToggleSelect }: { assets: AssetRecord[]; compact: boolean; loading: boolean; hasAssets: boolean; onSelect: (asset: AssetRecord) => void; onContextMenu: (event: React.MouseEvent, asset: AssetRecord) => void; selectedId?: string; flashId?: string | null; selectedIds: Set<string>; onToggleSelect: (id: string) => void }) {
+  const [visible, setVisible] = useState(WINDOW_STEP);
+  const [focusIndex, setFocusIndex] = useState(0);
+  const sentinelRef = useRef<HTMLLIElement>(null);
+  const listRef = useRef<HTMLUListElement>(null);
+
+  const shown = compact ? assets.slice(0, POPUP_CAP) : assets.slice(0, visible);
+  const hasMore = !compact && assets.length > visible;
+  const truncatedPopup = compact && assets.length > POPUP_CAP;
+
+  // Grow the window as the sentinel scrolls into view — keeps thousands of
+  // assets responsive without rendering them all or pulling in a virtualizer dep.
+  useEffect(() => {
+    const node = sentinelRef.current;
+    if (!node) return;
+    const io = new IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.isIntersecting)) setVisible((value) => value + WINDOW_STEP);
+    }, { rootMargin: "400px" });
+    io.observe(node);
+    return () => io.disconnect();
+  }, [hasMore, assets.length]);
+
+  const flashRef = useCallback((node: HTMLLIElement | null) => {
     if (node) node.scrollIntoView({ behavior: "smooth", block: "center" });
   }, []);
+
+  const onKeyDown = (event: React.KeyboardEvent) => {
+    if (!shown.length) return;
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      setFocusIndex((index) => {
+        const next = Math.max(0, Math.min(shown.length - 1, index + (event.key === "ArrowDown" ? 1 : -1)));
+        const row = listRef.current?.querySelector(`[data-row="${next}"]`);
+        row?.scrollIntoView({ block: "nearest" });
+        return next;
+      });
+    } else if (event.key === "Enter") {
+      event.preventDefault();
+      const asset = shown[Math.min(focusIndex, shown.length - 1)];
+      if (asset) onSelect(asset);
+    } else if (event.key === " ") {
+      event.preventDefault();
+      const asset = shown[Math.min(focusIndex, shown.length - 1)];
+      if (asset) onToggleSelect(asset.id);
+    }
+  };
 
   if (!assets.length) {
     return (
@@ -503,39 +594,60 @@ function AssetList({ assets, loading, hasAssets, onSelect, onContextMenu, select
   }
 
   return (
-    <ul className="divide-y divide-slate-100">
-      {assets.map((asset) => {
+    <ul
+      ref={listRef}
+      role="listbox"
+      aria-label="Captured assets"
+      tabIndex={0}
+      onKeyDown={onKeyDown}
+      className="divide-y divide-slate-100 outline-none"
+    >
+      {shown.map((asset, index) => {
         const isSelected = selectedId === asset.id;
+        const isChecked = selectedIds.has(asset.id);
+        const isFocused = index === focusIndex;
         const isFlashing = flashId === asset.id;
         const { primary, secondary } = describeUrl(asset.url);
         return (
-          <li key={asset.id}>
-            <button
-              ref={isFlashing ? flashRef : undefined}
-              onClick={() => onSelect(asset)}
-              onContextMenu={(event) => onContextMenu(event, asset)}
-              className={`group flex w-full items-center gap-3 px-4 py-2.5 text-left transition-colors ${
-                isSelected ? "bg-accent-soft" : "hover:bg-slate-50"
-              } ${isFlashing ? "picker-flash" : ""}`}
-            >
-              <KindBadge kind={asset.kind} />
-              <div className="min-w-0 flex-1">
-                <div className="flex items-center gap-1.5">
-                  <span className="truncate text-sm font-medium text-slate-800" title={asset.url}>{primary}</span>
-                  {asset.bodyAvailable && <span title="Bytes captured — downloads offline" className="h-1.5 w-1.5 shrink-0 rounded-full bg-accent" />}
-                </div>
-                {secondary && <div className="truncate text-xs text-slate-400" title={asset.url}>{secondary}</div>}
+          <li
+            key={asset.id}
+            ref={isFlashing ? flashRef : undefined}
+            data-row={index}
+            role="option"
+            aria-selected={isSelected}
+            onClick={() => { setFocusIndex(index); onSelect(asset); }}
+            onContextMenu={(event) => onContextMenu(event, asset)}
+            className={`group flex cursor-pointer items-center gap-2.5 px-4 py-2.5 transition-colors ${
+              isSelected ? "bg-accent-soft" : isChecked ? "bg-accent-soft/40" : "hover:bg-slate-50"
+            } ${isFocused ? "ring-1 ring-inset ring-accent/40" : ""} ${isFlashing ? "picker-flash" : ""}`}
+          >
+            <input
+              type="checkbox"
+              checked={isChecked}
+              onClick={(event) => event.stopPropagation()}
+              onChange={() => onToggleSelect(asset.id)}
+              className="h-3.5 w-3.5 shrink-0 cursor-pointer accent-accent"
+              aria-label={`Select ${primary}`}
+            />
+            <KindBadge kind={asset.kind} />
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-1.5">
+                <span className="truncate text-sm font-medium text-slate-800" title={asset.url}>{primary}</span>
+                {asset.bodyAvailable && <span title="Bytes captured — downloads offline" className="h-1.5 w-1.5 shrink-0 rounded-full bg-accent" />}
               </div>
-              {asset.status != null && <StatusPill status={asset.status} />}
-              <div className="flex shrink-0 items-center opacity-0 transition-opacity group-hover:opacity-100">
-                <RowAction title="Open in new tab" onClick={() => chrome.tabs.create({ url: asset.url })}>
-                  <ExternalLink size={14} />
-                </RowAction>
-              </div>
-            </button>
+              {secondary && <div className="truncate text-xs text-slate-400" title={asset.url}>{secondary}</div>}
+            </div>
+            {asset.status != null && <StatusPill status={asset.status} />}
+            <div className="flex shrink-0 items-center opacity-0 transition-opacity group-hover:opacity-100">
+              <RowAction title="Open in new tab" onClick={() => chrome.tabs.create({ url: asset.url })}>
+                <ExternalLink size={14} />
+              </RowAction>
+            </div>
           </li>
         );
       })}
+      {hasMore && <li ref={sentinelRef} className="px-4 py-3 text-center text-xs text-slate-400">Loading more… ({visible} of {assets.length})</li>}
+      {truncatedPopup && <li className="px-4 py-3 text-center text-xs text-slate-400">Showing {POPUP_CAP} of {assets.length} — open the full side panel to see all.</li>}
     </ul>
   );
 }

@@ -23,9 +23,15 @@ interface InspectorState {
   // the user mid-scroll (the DB only ever orders by updatedAt).
   sortKey: SortKey;
   sortDir: SortDir;
+  // Multi-select for bulk download/export. Lives in the store so the bulk
+  // toolbar, rows, and export wiring share one source of truth.
+  selectedIds: Set<string>;
   lastExport?: ExportJob;
   pickerActive: boolean;
   pickerResult?: PickerResult;
+  toggleSelect: (id: string) => void;
+  selectMany: (ids: string[]) => void;
+  clearSelection: () => void;
   toggleKind: (kind: AssetKind) => void;
   clearKinds: () => void;
   setQuery: (query: string) => void;
@@ -57,7 +63,17 @@ export const useInspectorStore = create<InspectorState>((set, get) => ({
   onlyPreviewable: false,
   sortKey: "updatedAt",
   sortDir: "desc",
+  selectedIds: new Set<string>(),
   pickerActive: false,
+  toggleSelect: (id) =>
+    set((state) => {
+      const selectedIds = new Set(state.selectedIds);
+      if (selectedIds.has(id)) selectedIds.delete(id);
+      else selectedIds.add(id);
+      return { selectedIds };
+    }),
+  selectMany: (ids) => set({ selectedIds: new Set(ids) }),
+  clearSelection: () => set({ selectedIds: new Set<string>() }),
   toggleKind: (kind) =>
     set((state) => {
       const kinds = new Set(state.kinds);
