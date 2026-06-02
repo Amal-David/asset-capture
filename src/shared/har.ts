@@ -37,15 +37,18 @@ interface HarEntry {
 }
 
 export function buildHar(assets: AssetRecord[], requests: RequestEvent[]) {
-  const requestMap = new Map<string, RequestEvent[]>();
+  // Index by URL once (O(requests)) so asset correlation is O(1), not a per-asset
+  // scan of every request group. Asset and request URLs are both redacted here,
+  // so they still match.
+  const byUrl = new Map<string, RequestEvent[]>();
   for (const request of requests) {
-    const items = requestMap.get(request.requestId) ?? [];
+    const items = byUrl.get(request.url) ?? [];
     items.push(request);
-    requestMap.set(request.requestId, items);
+    byUrl.set(request.url, items);
   }
 
   const entries: HarEntry[] = assets.map((asset) => {
-    const related = Array.from(requestMap.values()).find((events) => events.some((event) => event.url === asset.url)) ?? [];
+    const related = byUrl.get(asset.url) ?? [];
     const first = related[0];
     const last = related[related.length - 1];
     const responseHeaders = redactHeaders(last?.responseHeaders).value ?? {};

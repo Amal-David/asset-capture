@@ -72,6 +72,23 @@ export function redactInlineSecrets(value: string, flags: string[]): string {
   return output;
 }
 
+const TEXT_LIKE = [/^text\//i, /json/i, /javascript/i, /ecmascript/i, /xml/i, /csv/i, /x-www-form-urlencoded/i, /vnd\.apple\.mpegurl/i, /dash\+xml/i, /\+xml/i];
+
+export function isTextLikeMime(mime?: string): boolean {
+  if (!mime) return false;
+  const normalized = mime.split(";")[0]!.trim().toLowerCase();
+  return TEXT_LIKE.some((pattern) => pattern.test(normalized));
+}
+
+// Redact high-confidence secrets inside a response BODY (JWTs, provider keys,
+// bearer/query tokens). Used for export + text preview so captured bodies don't
+// leak credentials the header/URL redaction never saw.
+export function redactTextContent(text: string): RedactionResult<string> {
+  const flags: string[] = [];
+  const value = redactInlineSecrets(text, flags);
+  return { value, flags: unique(flags) };
+}
+
 function unique(values: string[]): string[] {
   return Array.from(new Set(values));
 }

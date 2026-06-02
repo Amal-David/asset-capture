@@ -1,8 +1,21 @@
 import { zipSync, strToU8 } from "fflate";
 import type { AssetRecord, ExportFailure, ExportJob, RequestEvent } from "./types";
 import { buildHar } from "./har";
-import { redactHeaders, redactUrl } from "./redact";
+import { isTextLikeMime, redactHeaders, redactTextContent, redactUrl } from "./redact";
 import { bytesToBase64, safeFilename, stableId } from "./url";
+
+// Strip secrets from text-like bodies before they enter an export archive; binary
+// bytes pass through untouched.
+function redactBodyBytes(bytes: Uint8Array, mime: string | undefined, summary: Set<string>): Uint8Array {
+  if (!isTextLikeMime(mime)) return bytes;
+  try {
+    const { value, flags } = redactTextContent(new TextDecoder().decode(bytes));
+    flags.forEach((flag) => summary.add(flag));
+    return textBytes(value);
+  } catch {
+    return bytes;
+  }
+}
 
 export interface ExportPayload {
   filename: string;
@@ -121,7 +134,7 @@ async function buildZip(
     const captured = bodies?.get(asset.id);
     if (captured) {
       const filename = uniqueName(`assets/${safeFilename(asset.url, asset.id)}`, usedNames);
-      files[filename] = captured.bytes;
+      files[filename] = redactBodyBytes(captured.bytes, captured.mime, redactionSummary);
       continue;
     }
 
@@ -135,7 +148,8 @@ async function buildZip(
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const arrayBuffer = await response.arrayBuffer();
       const filename = uniqueName(`assets/${safeFilename(asset.url, asset.id)}`, usedNames);
-      files[filename] = new Uint8Array(arrayBuffer);
+      const ct = response.headers.get("content-type") ?? asset.mime;
+      files[filename] = redactBodyBytes(new Uint8Array(arrayBuffer), ct, redactionSummary);
     } catch (error) {
       failures.push({
         assetId: asset.id,

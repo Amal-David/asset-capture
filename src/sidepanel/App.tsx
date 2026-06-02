@@ -24,9 +24,16 @@ const KIND_BADGE: Record<AssetKind, string> = {
   model: "bg-fuchsia-50 text-fuchsia-700 ring-fuchsia-600/20",
   subtitle: "bg-cyan-50 text-cyan-700 ring-cyan-600/20",
   manifest: "bg-rose-50 text-rose-700 ring-rose-600/20",
+  document: "bg-red-50 text-red-700 ring-red-600/20",
   binary: "bg-slate-100 text-slate-600 ring-slate-500/20",
   unknown: "bg-slate-100 text-slate-500 ring-slate-400/20"
 };
+
+// Only navigate to schemes that are safe in a top-level tab — never data:/javascript:
+// (a captured data:text/html could otherwise execute markup when "opened").
+function openExternal(url: string): void {
+  if (/^(https?|blob):/i.test(url)) chrome.tabs.create({ url });
+}
 
 const EXPORTS: Array<{ type: ExportJob["type"]; label: string; icon: React.ReactNode }> = [
   { type: "json", label: "JSON metadata", icon: <FileJson size={15} /> },
@@ -561,7 +568,7 @@ function ManifestCard({ record, tabId }: { record: MediaRecord; tabId?: number }
         <span className="shrink-0 rounded-md bg-rose-50 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-rose-700 ring-1 ring-inset ring-rose-600/20">{record.mediaKind}</span>
         <a
           href={record.manifestUrl}
-          onClick={(e) => { e.preventDefault(); chrome.tabs.create({ url: record.manifestUrl }); }}
+          onClick={(e) => { e.preventDefault(); openExternal(record.manifestUrl); }}
           className="min-w-0 flex-1 truncate font-mono text-xs text-accent hover:underline"
           title={record.manifestUrl}
         >
@@ -579,6 +586,21 @@ function ManifestCard({ record, tabId }: { record: MediaRecord; tabId?: number }
           {parsed.codecs.length > 0 && <div className="truncate"><span className="text-slate-400">Codecs:</span> {parsed.codecs.join(", ")}</div>}
           {parsed.variants.length > 0 && <div><span className="text-slate-400">Variants:</span> {parsed.variants.length}</div>}
           {parsed.segmentCount != null && <div><span className="text-slate-400">Segments:</span> {parsed.segmentCount}</div>}
+          {parsed.variants.some((v) => v.uri) && (
+            <div className="mt-1 space-y-0.5">
+              {parsed.variants.filter((v) => v.uri).map((v, i) => (
+                <a
+                  key={i}
+                  href={resolveUrl(v.uri!, record.manifestUrl)}
+                  onClick={(e) => { e.preventDefault(); openExternal(resolveUrl(v.uri!, record.manifestUrl)); }}
+                  className="block truncate font-mono text-[11px] text-accent hover:underline"
+                  title={v.uri}
+                >
+                  {v.resolution ?? "variant"} → {v.uri}
+                </a>
+              ))}
+            </div>
+          )}
           {parsed.variants.length === 0 && parsed.resolutions.length === 0 && parsed.segmentCount == null && (
             <div className="text-slate-400">Media playlist (no variant info).</div>
           )}
@@ -725,7 +747,7 @@ function AssetList({ assets, compact, loading, hasAssets, onSelect, onContextMen
             </div>
             {asset.status != null && <StatusPill status={asset.status} />}
             <div className="flex shrink-0 items-center opacity-0 transition-opacity group-hover:opacity-100">
-              <RowAction title="Open in new tab" onClick={() => chrome.tabs.create({ url: asset.url })}>
+              <RowAction title="Open in new tab" onClick={() => openExternal(asset.url)}>
                 <ExternalLink size={14} />
               </RowAction>
             </div>
@@ -805,7 +827,7 @@ function AssetContextMenu({ menu, onClose }: { menu: { x: number; y: number; ass
     >
       <ContextItem icon={<Download size={15} />} label="Download" onClick={run(() => downloadAsset(asset.url, safeFilename(asset.url, asset.id), asset.id))} />
       <ContextItem icon={<Copy size={15} />} label="Copy URL" onClick={run(() => navigator.clipboard.writeText(asset.url))} />
-      <ContextItem icon={<ExternalLink size={15} />} label="Open in new tab" onClick={run(() => { chrome.tabs.create({ url: asset.url }); })} />
+      <ContextItem icon={<ExternalLink size={15} />} label="Open in new tab" onClick={run(() => { openExternal(asset.url); })} />
       <ContextItem
         icon={<Clipboard size={15} />}
         label="Copy as data URL"
@@ -869,7 +891,7 @@ function PreviewDrawer({ asset, compact, onClose, onContextMenu }: { asset: Asse
             <IconButton title={copied ? "Copied!" : "Copy URL"} onClick={copyUrl}>
               {copied ? <Check size={16} className="text-accent" /> : <Copy size={16} />}
             </IconButton>
-            <IconButton title="Open in new tab" onClick={() => chrome.tabs.create({ url: asset.url })}>
+            <IconButton title="Open in new tab" onClick={() => openExternal(asset.url)}>
               <ExternalLink size={16} />
             </IconButton>
             <IconButton title="Close" onClick={onClose}>
@@ -955,6 +977,7 @@ function PreviewBody({ asset }: { asset: AssetRecord }) {
   if (asset.kind === "video" || asset.kind === "audio") return <ProbedPreview kind={asset.kind} src={src} asset={asset} />;
   if (asset.kind === "font") return <FontPreview url={src} asset={asset} />;
   if (asset.kind === "model") return <ModelPreview asset={asset} src={src} />;
+  if (asset.kind === "document") return <PdfPreview src={src} />;
 
   return (
     <div className="flex flex-col items-center gap-2 py-8 text-center text-slate-400">
@@ -1075,7 +1098,7 @@ function FailCard({ asset, title, desc, canDownload = true }: { asset: AssetReco
           </button>
         )}
         {!asset.url.startsWith("blob:") && (
-          <button className="flex items-center gap-1 rounded-md border border-slate-200 px-2.5 py-1 text-xs text-slate-600 hover:bg-slate-50" onClick={() => chrome.tabs.create({ url: asset.url })}>
+          <button className="flex items-center gap-1 rounded-md border border-slate-200 px-2.5 py-1 text-xs text-slate-600 hover:bg-slate-50" onClick={() => openExternal(asset.url)}>
             <ExternalLink size={13} /> Open
           </button>
         )}
@@ -1119,6 +1142,15 @@ function FontPreview({ url, asset }: { url: string; asset: AssetRecord }) {
       <div className="text-2xl">The quick brown fox jumps over the lazy dog</div>
       <div className="text-base">ABCDEFGHIJKLMNOPQRSTUVWXYZ 0123456789</div>
       <div className="text-sm">abcdefghijklmnopqrstuvwxyz !@#$%&amp;</div>
+    </div>
+  );
+}
+
+function PdfPreview({ src }: { src: string }) {
+  return (
+    <div className="w-full">
+      <embed src={src} type="application/pdf" className="h-[340px] w-full rounded bg-white" />
+      <div className="mt-2 text-center text-[11px] text-slate-400">If the PDF doesn't render inline, use Download or Open.</div>
     </div>
   );
 }
@@ -1168,7 +1200,7 @@ function MetaRow({ label, value, mono, clickable }: { label: string; value: stri
             href={value}
             className="block min-w-0 break-all font-mono text-xs text-accent hover:underline"
             title="Open in new tab"
-            onClick={(e) => { e.preventDefault(); chrome.tabs.create({ url: value }); }}
+            onClick={(e) => { e.preventDefault(); openExternal(value); }}
           >
             {value}
           </a>
@@ -1210,6 +1242,14 @@ function hostOf(url: string): string | undefined {
     return new URL(url).hostname || undefined;
   } catch {
     return undefined;
+  }
+}
+
+function resolveUrl(relative: string, base: string): string {
+  try {
+    return new URL(relative, base).toString();
+  } catch {
+    return relative;
   }
 }
 

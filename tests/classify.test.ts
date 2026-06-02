@@ -78,7 +78,7 @@ describe("classifyAsset", () => {
     // Regression: a truthy-but-unrecognized MIME used to re-enter the data:/blob:
     // branch forever and overflow the stack, crashing the service worker.
     expect(classifyAsset({ url: "data:text/html,<p>hi</p>" })).toBe("binary");
-    expect(classifyAsset({ url: "data:application/pdf;base64,AAAA" })).toBe("binary");
+    expect(classifyAsset({ url: "data:application/pdf;base64,AAAA" })).toBe("document");
     expect(classifyAsset({ url: "blob:https://app.example.com/xyz", mime: "text/html" })).toBe("binary");
     expect(classifyAsset({ url: "blob:https://app.example.com/xyz" })).toBe("binary");
   });

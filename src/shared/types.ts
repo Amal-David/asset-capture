@@ -12,6 +12,7 @@ export type AssetKind =
   | "model"
   | "subtitle"
   | "manifest"
+  | "document"
   | "binary"
   | "unknown";
 

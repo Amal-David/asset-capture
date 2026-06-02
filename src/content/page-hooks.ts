@@ -4,13 +4,15 @@
   // goes stale. Reads stay off the synchronous return path and are size-capped.
   const MAX_BODY_BYTES = 16 * 1024 * 1024;
 
+  // "/" restricts delivery to this same window's origin (and handles opaque
+  // origins), so captured bytes aren't broadcast to cross-origin frames.
   const post = (payload: unknown) => {
-    window.postMessage({ source: "asset-inspector-page-hook", payload }, "*");
+    window.postMessage({ source: "asset-inspector-page-hook", payload }, "/");
   };
 
   const postBody = (key: string, mime: string | undefined, buffer: ArrayBuffer | undefined) => {
     if (!key || !buffer || buffer.byteLength === 0 || buffer.byteLength > MAX_BODY_BYTES) return;
-    window.postMessage({ source: "asset-inspector-page-hook-body", payload: { key, mime, buffer } }, "*");
+    window.postMessage({ source: "asset-inspector-page-hook-body", payload: { key, mime, buffer } }, "/");
   };
 
   const captureBlobBody = (key: string, blob: Blob) => {
@@ -127,8 +129,34 @@
 
   URL.revokeObjectURL = (url: string) => {
     post({ kind: "blob-revoked", blobUrl: url, timestamp: Date.now() });
+    const entry = mseParts.get(url);
+    if (entry?.timer) clearTimeout(entry.timer);
+    mseParts.delete(url); // release accumulated MSE segments for this stream
     return originalRevokeObjectURL(url);
   };
+
+  // WebSocket binary frames (images/protobuf pushed by Figma/Slack/realtime apps)
+  // are invisible to webRequest, which sees only the handshake. Capture each binary
+  // frame as its own asset keyed by the socket URL.
+  const OriginalWebSocket = window.WebSocket;
+  if (OriginalWebSocket) {
+    const WrappedWebSocket = function (url: string | URL, protocols?: string | string[]) {
+      const socket = protocols === undefined ? new OriginalWebSocket(url) : new OriginalWebSocket(url, protocols);
+      const wsUrl = typeof url === "string" ? url : url.toString();
+      let frame = 0;
+      socket.addEventListener("message", (event: MessageEvent) => {
+        const data = event.data;
+        if (data instanceof ArrayBuffer) postBody(`${wsUrl}#ws-${frame++}`, undefined, data);
+        else if (typeof Blob !== "undefined" && data instanceof Blob) captureBlobBody(`${wsUrl}#ws-${frame++}`, data);
+      });
+      return socket;
+    } as unknown as typeof WebSocket;
+    WrappedWebSocket.prototype = OriginalWebSocket.prototype;
+    (["CONNECTING", "OPEN", "CLOSING", "CLOSED"] as const).forEach((key) => {
+      (WrappedWebSocket as unknown as Record<string, unknown>)[key] = (OriginalWebSocket as unknown as Record<string, unknown>)[key];
+    });
+    window.WebSocket = WrappedWebSocket;
+  }
 
   const originalFetch = window.fetch.bind(window);
   window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {

@@ -124,9 +124,12 @@ function reobserveLiveRoots(): void {
     if (!root.host?.isConnected) { observedRoots.delete(root); pruned = true; }
   }
   if (!pruned) return;
+  // Drain queued mutations before disconnect so SPA changes aren't lost in the gap.
+  const pending = observer.takeRecords();
   observer.disconnect();
   observer.observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: OBSERVED_ATTRS });
   for (const root of observedRoots) observer.observe(root, { childList: true, subtree: true, attributes: true, attributeFilter: OBSERVED_ATTRS });
+  if (pending.length) handleMutations(pending);
 }
 
 function flushDirty(): void {

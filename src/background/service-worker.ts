@@ -4,6 +4,7 @@ import { clearSession, db, getSnapshot, sessionIdForTab } from "../shared/db";
 import type { PickerResult, RuntimeMessage, RuntimeResponse } from "../shared/messages";
 import type { AssetRecord, BlobRecord, CaptureSource, MediaRecord, RequestEvent } from "../shared/types";
 import { base64ToBytes, getExtension, inferFrameOrigin, stableId } from "../shared/url";
+import { redactTextContent } from "../shared/redact";
 
 const requestStarts = new Map<string, number>();
 const deepCaptureTabs = new Set<number>();
@@ -76,19 +77,26 @@ chrome.runtime.onMessage.addListener((message: RuntimeMessage, sender, sendRespo
   return true;
 });
 
-// requestId -> response meta, so loadingFinished can fetch the body by URL.
+// "tabId:requestId" -> response meta, so loadingFinished can fetch the body by URL.
+// Tab-scoped key avoids cross-tab collisions; capped + purged-on-detach to bound it.
 const debuggerResponses = new Map<string, { url: string; mime?: string }>();
+const MAX_DEBUGGER_PENDING = 1000;
 
 chrome.debugger.onEvent.addListener((source, method, params) => {
   if (!source.tabId || !method.startsWith("Network.")) return;
   const tabId = source.tabId;
   const event = params as Record<string, unknown>;
+  const requestId = typeof event.requestId === "string" ? event.requestId : undefined;
+  const key = requestId ? `${tabId}:${requestId}` : undefined;
+  const response = event.response as Record<string, unknown> | undefined;
+  const request = event.request as Record<string, unknown> | undefined;
 
-  if (method === "Network.responseReceived") {
-    const response = event.response as Record<string, unknown> | undefined;
-    const requestId = typeof event.requestId === "string" ? event.requestId : undefined;
+  if (method === "Network.responseReceived" && key) {
     const url = typeof response?.url === "string" ? response.url : undefined;
-    if (requestId && url) debuggerResponses.set(requestId, { url, mime: typeof response?.mimeType === "string" ? response.mimeType : undefined });
+    if (url) {
+      if (debuggerResponses.size >= MAX_DEBUGGER_PENDING) debuggerResponses.delete(debuggerResponses.keys().next().value as string);
+      debuggerResponses.set(key, { url, mime: typeof response?.mimeType === "string" ? response.mimeType : undefined });
+    }
   }
 
   const url = extractDebuggerUrl(event);
@@ -97,9 +105,10 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
       sessionId: sessionIdForTab(tabId),
       tabId,
       url,
-      method: typeof event.method === "string" ? event.method : undefined,
-      status: typeof event.status === "number" ? event.status : undefined,
-      mime: typeof event.mimeType === "string" ? event.mimeType : undefined,
+      // CDP nests these under request/response, not the top-level params.
+      method: typeof request?.method === "string" ? request.method : undefined,
+      status: typeof response?.status === "number" ? response.status : undefined,
+      mime: typeof response?.mimeType === "string" ? response.mimeType : undefined,
       initiator: "Chrome Debugger Network domain",
       sources: ["devtools"]
     });
@@ -108,18 +117,16 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
   // The debugger is the only MV3 way to read bytes the page never fetched —
   // browser-initiated static assets, opaque cross-origin, and PWA service-worker /
   // Cache-API replays that webRequest sees only as bodiless cache hits.
-  if (method === "Network.loadingFinished") {
-    const requestId = typeof event.requestId === "string" ? event.requestId : undefined;
-    if (requestId) void captureDebuggerBody(tabId, requestId);
-  } else if (method === "Network.loadingFailed") {
-    const requestId = typeof event.requestId === "string" ? event.requestId : undefined;
-    if (requestId) debuggerResponses.delete(requestId);
+  if (method === "Network.loadingFinished" && key) {
+    void captureDebuggerBody(tabId, requestId!, key);
+  } else if (method === "Network.loadingFailed" && key) {
+    debuggerResponses.delete(key);
   }
 });
 
-async function captureDebuggerBody(tabId: number, requestId: string): Promise<void> {
-  const meta = debuggerResponses.get(requestId);
-  debuggerResponses.delete(requestId);
+async function captureDebuggerBody(tabId: number, requestId: string, key: string): Promise<void> {
+  const meta = debuggerResponses.get(key);
+  debuggerResponses.delete(key);
   if (!meta) return;
   try {
     const result = (await chrome.debugger.sendCommand({ tabId }, "Network.getResponseBody", { requestId })) as { body?: string; base64Encoded?: boolean } | undefined;
@@ -132,7 +139,12 @@ async function captureDebuggerBody(tabId: number, requestId: string): Promise<vo
 }
 
 chrome.debugger.onDetach.addListener((source) => {
-  if (source.tabId) deepCaptureTabs.delete(source.tabId);
+  if (!source.tabId) return;
+  deepCaptureTabs.delete(source.tabId);
+  const prefix = `${source.tabId}:`;
+  for (const key of debuggerResponses.keys()) {
+    if (key.startsWith(prefix)) debuggerResponses.delete(key);
+  }
 });
 
 async function handleMessage(message: RuntimeMessage, sender: chrome.runtime.MessageSender): Promise<RuntimeResponse> {
@@ -225,13 +237,14 @@ async function handleMessage(message: RuntimeMessage, sender: chrome.runtime.Mes
       // host_permissions grant cross-origin reads, so this is a normal cors/basic
       // response (never opaque); real failures throw to the catch below.
       const response = await fetch(message.url, { credentials: "omit" });
-      const raw = await response.text();
       const LIMIT = 200_000;
-      const truncated = raw.length > LIMIT;
+      const { text: raw, truncated } = await readTextCapped(response, LIMIT);
+      // Redact secrets in the body before it ever reaches the UI / clipboard.
+      const redacted = redactTextContent(raw).value;
       return {
         ok: true,
         text: {
-          content: truncated ? raw.slice(0, LIMIT) : raw,
+          content: redacted,
           truncated,
           ok: response.ok,
           status: response.status,
@@ -387,6 +400,30 @@ async function storeAssetBody(
     pageUrl: message.pageUrl,
     source: message.key.startsWith("blob:") ? "blob" : "fetch"
   });
+}
+
+// Stream a text response and stop at the limit, so a huge/streamed body never
+// fully buffers in the MV3 worker before being sliced.
+async function readTextCapped(response: Response, limit: number): Promise<{ text: string; truncated: boolean }> {
+  if (!response.body) {
+    const raw = await response.text();
+    return raw.length > limit ? { text: raw.slice(0, limit), truncated: true } : { text: raw, truncated: false };
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let text = "";
+  let truncated = false;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      text += decoder.decode(value, { stream: true });
+      if (text.length > limit) { text = text.slice(0, limit); truncated = true; void reader.cancel(); break; }
+    }
+  } catch {
+    // Return whatever was read.
+  }
+  return { text, truncated };
 }
 
 const MAX_STORED_BODY_BYTES = 16 * 1024 * 1024;

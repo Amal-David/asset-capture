@@ -108,7 +108,9 @@ export const useInspectorStore = create<InspectorState>((set, get) => ({
       // Prune selection against the live snapshot so deterministic re-captured ids
       // can never silently re-attach a stale selection to assets the user didn't pick.
       const selected = get().selectedIds;
-      if (selected.size) {
+      // Skip pruning on an empty snapshot (e.g. a transient poll mid-clear) so an
+      // in-progress multi-selection isn't wiped by a momentary empty result.
+      if (selected.size && response.snapshot.assets.length > 0) {
         const live = new Set(response.snapshot.assets.map((asset) => asset.id));
         const pruned = new Set([...selected].filter((id) => live.has(id)));
         if (pruned.size !== selected.size) updates.selectedIds = pruned;

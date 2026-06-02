@@ -95,7 +95,8 @@ const EXTENSION_KIND: Record<string, AssetKind> = {
   dfxp: "subtitle",
   ttml: "subtitle",
   m3u8: "manifest",
-  mpd: "manifest"
+  mpd: "manifest",
+  pdf: "document"
 };
 
 export interface ClassificationInput {
@@ -120,6 +121,7 @@ export function classifyAsset(input: ClassificationInput): AssetKind {
   if (mime === "text/css") return "css";
   if (mime === "text/javascript" || mime === "application/javascript") return "script";
   if (mime === "application/wasm") return "wasm";
+  if (mime === "application/pdf") return "document";
   if (mime?.includes("mpegurl") || mime === "application/dash+xml") return "manifest";
   if (mime?.includes("zip") || mime?.includes("gzip") || mime?.includes("tar")) return "archive";
   if (mime === "text/vtt" || mime === "application/x-subrip") return "subtitle";
@@ -151,7 +153,7 @@ function classifyByMime(mime?: string): AssetKind {
 }
 
 export function isPreviewableKind(kind: AssetKind): boolean {
-  return kind === "image" || kind === "video" || kind === "audio" || kind === "font" || kind === "json" || kind === "api" || kind === "manifest" || kind === "model" || kind === "subtitle" || kind === "css";
+  return kind === "image" || kind === "video" || kind === "audio" || kind === "font" || kind === "json" || kind === "api" || kind === "manifest" || kind === "model" || kind === "subtitle" || kind === "css" || kind === "document";
 }
 
 export function isModelViewerCompatible(url: string, mime?: string): boolean {

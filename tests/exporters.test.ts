@@ -50,6 +50,17 @@ describe("export builders", () => {
     expect(text).not.toContain("Bearer nope");
   });
 
+  it("redacts secrets inside captured text bodies written to the ZIP", async () => {
+    const bodies = new Map([
+      ["asset-1", { mime: "application/json", bytes: new TextEncoder().encode('{"jwt":"eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abcdef","ok":true}') }]
+    ]);
+    const payload = await buildExportPayload("zip", "tab-1", [asset], [], undefined, bodies);
+    const files = unzipSync(payload.bytes);
+    const body = new TextDecoder().decode(files["assets/image.png"]);
+    expect(body).not.toContain("eyJhbGciOiJIUzI1NiJ9");
+    expect(body).toContain("[REDACTED]");
+  });
+
   it("records ZIP fetch failures without hiding them", async () => {
     const payload = await buildExportPayload("zip", "tab-1", [{ ...asset, url: "blob:https://example.com/abc" }], []);
     const files = unzipSync(payload.bytes);
