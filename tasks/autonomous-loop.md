@@ -56,4 +56,11 @@ Goal: most comprehensive + intelligent asset-capture extension. Adversarial agen
   embed preview, WebSocket binary-frame capture, resolved clickable variant URIs). 40 tests.
   DEFERRED (need new dep -> 7-day cooldown / user approval): hls.js playable stream preview;
   true list virtualizer for 5k+ assets (current windowing covers typical sessions).
-- Iteration 3: adversarial verification round (confirm round-2 fixes, deep correctness/security sweep).
+- Adversarial round 3 (wqg0qiygc): 11 findings.
+- Round-3 fixes (999cd6b): all 11 — persistence-boundary body redaction [CRITICAL: closes preview/
+  clipboard/CDP leaks], WebSocket 24-frame cap + class subclass [CRITICAL quota DoS], fatal-decode in
+  export redaction, streams visible in popup, silent background poll (preserves action errors),
+  broadened secret patterns (ya29/openai/github-pat/PEM), startup orphan-session sweep, MSE re-post
+  throttle, drawer role=dialog focus trap/restore, id-based keyboard focus. 41 tests.
+- Iteration 4: convergence-check round (verify round-3 fixes; only genuine must-fixes). Running.
+- Standing deferred (need new dep / user approval): hls.js playable preview; list virtualizer.
