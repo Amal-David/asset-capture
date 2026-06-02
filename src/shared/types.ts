@@ -46,6 +46,7 @@ export interface AssetRecord {
   status?: number;
   size?: number;
   timing?: TimingSummary;
+  resourceType?: string;
   initiator?: string;
   frameOrigin?: string;
   sources: CaptureSource[];

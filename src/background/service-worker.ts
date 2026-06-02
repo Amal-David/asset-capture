@@ -1,4 +1,4 @@
-import { classifyAsset, isPreviewableKind } from "../shared/classify";
+import { classifyAsset, isGenericMime, isPreviewableKind, sniffMimeFromBytes } from "../shared/classify";
 import { buildExportPayload, bytesToDataUrl } from "../shared/exporters";
 import { clearSession, db, getSnapshot, sessionIdForTab } from "../shared/db";
 import type { PickerResult, RuntimeMessage, RuntimeResponse } from "../shared/messages";
@@ -304,17 +304,27 @@ async function storeAssetBody(
   const sessionId = sessionIdForTab(tabId);
   const assetId = `asset-${stableId(`${sessionId}:${message.key}`)}`;
   const bytes = base64ToBytes(message.base64);
-  const mime = message.mime ?? "application/octet-stream";
+  // Intelligent detection: when the wire MIME is missing/generic, trust the
+  // bytes. This rescues mislabeled assets (octet-stream images, extensionless
+  // CDN/object-store URLs) that would otherwise be unclassified & unpreviewable.
+  const sniffed = isGenericMime(message.mime) ? sniffMimeFromBytes(bytes.subarray(0, 64)) : undefined;
+  const mime = sniffed ?? message.mime ?? "application/octet-stream";
   try {
     await db.assetBodies.put({ assetId, sessionId, mime, bytes, byteLength: bytes.byteLength, createdAt: Date.now() });
   } catch {
     // Quota or storage failure must not break capture; the asset stays metadata-only.
     return;
   }
-  // Atomic flag flip so a concurrent upsertAsset can't clobber the merge.
+  // Atomic flag flip + re-classification so a concurrent upsertAsset can't clobber
+  // the merge, and so byte-derived knowledge upgrades a previously-binary asset.
   const updated = await db.assets.where("id").equals(assetId).modify((asset) => {
     asset.bodyAvailable = true;
-    asset.mime = asset.mime ?? mime;
+    // A byte-sniffed MIME beats a stored generic one; otherwise fill if absent.
+    if (sniffed && isGenericMime(asset.mime)) asset.mime = sniffed;
+    else if (!asset.mime) asset.mime = mime;
+    const kind = classifyAsset({ url: asset.url, mime: asset.mime, resourceType: asset.resourceType ?? asset.sources[0], sources: asset.sources });
+    asset.kind = kind;
+    asset.previewAvailable = isPreviewableKind(kind);
     asset.updatedAt = Date.now();
   });
   if (updated > 0) return;
@@ -376,6 +386,7 @@ async function upsertAssetFromRequest(
       completedAt: "timeStamp" in details ? details.timeStamp : undefined,
       durationMs: startedAt ? details.timeStamp - startedAt : undefined
     },
+    resourceType: "type" in details ? details.type : undefined,
     initiator: "initiator" in details ? details.initiator : undefined,
     sources: [source]
   });
@@ -396,7 +407,7 @@ async function upsertAssetFromPartial(
   });
 }
 
-async function upsertAsset(input: Partial<AssetRecord> & Pick<AssetRecord, "sessionId" | "url" | "sources">): Promise<AssetRecord> {
+async function upsertAsset(input: Partial<AssetRecord> & Pick<AssetRecord, "sessionId" | "url" | "sources"> & { resourceType?: string }): Promise<AssetRecord> {
   const now = Date.now();
   const id = input.id ?? `asset-${stableId(`${input.sessionId}:${input.url}`)}`;
   // Many capture sources (webRequest phases, DOM scan, page hooks) upsert the
@@ -404,7 +415,10 @@ async function upsertAsset(input: Partial<AssetRecord> & Pick<AssetRecord, "sess
   // merged sources/timing. The read-modify-write must run in one rw transaction.
   return db.transaction("rw", db.assets, async () => {
     const existing = await db.assets.get(id);
-    const kind = input.kind ?? classifyAsset({ url: input.url, mime: input.mime, resourceType: input.sources[0], sources: input.sources });
+    const resourceType = input.resourceType ?? existing?.resourceType;
+    // Prefer the real webRequest resourceType (image/media/font/xmlhttprequest/…)
+    // over the capture-source label so the classifier's resourceType branches fire.
+    const kind = input.kind ?? classifyAsset({ url: input.url, mime: input.mime, resourceType: resourceType ?? input.sources[0], sources: input.sources });
     const mergedSources = Array.from(new Set([...(existing?.sources ?? []), ...input.sources]));
     const record: AssetRecord = {
       id,
@@ -420,6 +434,7 @@ async function upsertAsset(input: Partial<AssetRecord> & Pick<AssetRecord, "sess
       status: input.status ?? existing?.status,
       size: input.size ?? existing?.size,
       timing: { ...existing?.timing, ...input.timing },
+      resourceType,
       initiator: input.initiator ?? existing?.initiator,
       frameOrigin: input.frameOrigin ?? existing?.frameOrigin ?? inferFrameOrigin(input.initiator),
       sources: mergedSources,

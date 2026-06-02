@@ -158,3 +158,112 @@ export function isModelViewerCompatible(url: string, mime?: string): boolean {
   const ext = getExtension(url);
   return ext === "glb" || ext === "gltf" || mime === "model/gltf-binary" || mime === "model/gltf+json";
 }
+
+// MIME types the wire gives us that carry no real signal — for these we trust
+// the bytes over the header. Servers routinely mislabel real assets like this.
+const GENERIC_MIMES = new Set([
+  "",
+  "application/octet-stream",
+  "binary/octet-stream",
+  "application/binary",
+  "application/download",
+  "application/force-download",
+  "application/unknown",
+  "content/unknown",
+  "text/plain",
+  "*/*"
+]);
+
+export function isGenericMime(mime?: string): boolean {
+  if (!mime) return true;
+  return GENERIC_MIMES.has(mime.split(";")[0]!.trim().toLowerCase());
+}
+
+function asciiAt(bytes: Uint8Array, start: number, length: number): string {
+  let out = "";
+  const end = Math.min(start + length, bytes.length);
+  for (let i = start; i < end; i += 1) out += String.fromCharCode(bytes[i]!);
+  return out;
+}
+
+function hasSignature(bytes: Uint8Array, signature: number[], offset = 0): boolean {
+  if (bytes.length < offset + signature.length) return false;
+  for (let i = 0; i < signature.length; i += 1) {
+    if (bytes[offset + i] !== signature[i]) return false;
+  }
+  return true;
+}
+
+// Intelligent detection: infer a real MIME purely from the leading bytes, so an
+// extensionless / generically-typed response (S3-hashed image, /media?id=, an
+// API that returns octet-stream) still classifies and previews correctly.
+// Covers the dominant binary signatures plus a guarded SVG/JSON text probe.
+export function sniffMimeFromBytes(bytes: Uint8Array): string | undefined {
+  if (!bytes || bytes.length < 4) return undefined;
+
+  // Images
+  if (hasSignature(bytes, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) return "image/png";
+  if (hasSignature(bytes, [0xff, 0xd8, 0xff])) return "image/jpeg";
+  if (hasSignature(bytes, [0x47, 0x49, 0x46, 0x38])) return "image/gif";
+  if (hasSignature(bytes, [0x42, 0x4d])) return "image/bmp";
+  if (hasSignature(bytes, [0x00, 0x00, 0x01, 0x00])) return "image/x-icon";
+
+  // RIFF containers: WEBP image, WAV audio, AVI video
+  if (asciiAt(bytes, 0, 4) === "RIFF") {
+    const form = asciiAt(bytes, 8, 4);
+    if (form === "WEBP") return "image/webp";
+    if (form === "WAVE") return "audio/wav";
+    if (form === "AVI ") return "video/x-msvideo";
+  }
+
+  // ISO-BMFF "ftyp" box: mp4 / avif / heic / quicktime / m4a
+  if (asciiAt(bytes, 4, 4) === "ftyp") {
+    const brand = asciiAt(bytes, 8, 4);
+    if (brand.startsWith("avif") || brand.startsWith("avis")) return "image/avif";
+    if (["heic", "heix", "heim", "heis", "hevc", "mif1", "msf1"].includes(brand)) return "image/heic";
+    if (brand.startsWith("M4A")) return "audio/mp4";
+    if (brand === "qt  ") return "video/quicktime";
+    return "video/mp4";
+  }
+
+  // Fonts
+  if (asciiAt(bytes, 0, 4) === "wOF2") return "font/woff2";
+  if (asciiAt(bytes, 0, 4) === "wOFF") return "font/woff";
+  if (asciiAt(bytes, 0, 4) === "OTTO") return "font/otf";
+  if (asciiAt(bytes, 0, 4) === "ttcf") return "font/collection";
+  if (hasSignature(bytes, [0x00, 0x01, 0x00, 0x00])) return "font/ttf";
+
+  // 3D
+  if (asciiAt(bytes, 0, 4) === "glTF") return "model/gltf-binary";
+
+  // Audio
+  if (hasSignature(bytes, [0x49, 0x44, 0x33])) return "audio/mpeg"; // ID3-tagged mp3
+  if (bytes[0] === 0xff && (bytes[1]! & 0xe0) === 0xe0) return "audio/mpeg"; // MPEG audio frame sync
+  if (asciiAt(bytes, 0, 4) === "OggS") return "application/ogg";
+  if (asciiAt(bytes, 0, 4) === "fLaC") return "audio/flac";
+
+  // Video / matroska
+  if (hasSignature(bytes, [0x1a, 0x45, 0xdf, 0xa3])) return "video/webm";
+
+  // Documents / archives / wasm
+  if (asciiAt(bytes, 0, 4) === "%PDF") return "application/pdf";
+  if (hasSignature(bytes, [0x00, 0x61, 0x73, 0x6d])) return "application/wasm";
+  if (hasSignature(bytes, [0x1f, 0x8b])) return "application/gzip";
+  if (
+    hasSignature(bytes, [0x50, 0x4b, 0x03, 0x04]) ||
+    hasSignature(bytes, [0x50, 0x4b, 0x05, 0x06]) ||
+    hasSignature(bytes, [0x50, 0x4b, 0x07, 0x08])
+  ) return "application/zip";
+  if (hasSignature(bytes, [0x42, 0x5a, 0x68])) return "application/x-bzip2";
+  if (hasSignature(bytes, [0x37, 0x7a, 0xbc, 0xaf, 0x27, 0x1c])) return "application/x-7z-compressed";
+  if (hasSignature(bytes, [0x52, 0x61, 0x72, 0x21, 0x1a, 0x07])) return "application/vnd.rar";
+
+  // Guarded text probe (only meaningful because callers sniff generic MIMEs):
+  // detect SVG and JSON, which are very commonly served as octet-stream/text.
+  const head = new TextDecoder("utf-8", { fatal: false }).decode(bytes.subarray(0, Math.min(bytes.length, 512))).trimStart();
+  if (/^<\?xml/i.test(head) && /<svg[\s>]/i.test(head)) return "image/svg+xml";
+  if (/^<svg[\s>]/i.test(head)) return "image/svg+xml";
+  if (/^[[{]/.test(head)) return "application/json";
+
+  return undefined;
+}

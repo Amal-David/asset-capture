@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { classifyAsset, isModelViewerCompatible } from "../src/shared/classify";
+import { classifyAsset, isGenericMime, isModelViewerCompatible, sniffMimeFromBytes } from "../src/shared/classify";
+
+function bytesOf(...values: number[]): Uint8Array {
+  return new Uint8Array(values);
+}
+function textBytes(value: string): Uint8Array {
+  return new TextEncoder().encode(value);
+}
 
 describe("classifyAsset", () => {
   it("classifies assets from MIME type before extension", () => {
@@ -74,6 +81,59 @@ describe("classifyAsset", () => {
     expect(classifyAsset({ url: "data:application/pdf;base64,AAAA" })).toBe("binary");
     expect(classifyAsset({ url: "blob:https://app.example.com/xyz", mime: "text/html" })).toBe("binary");
     expect(classifyAsset({ url: "blob:https://app.example.com/xyz" })).toBe("binary");
+  });
+});
+
+describe("sniffMimeFromBytes", () => {
+  it("identifies common binary signatures so mislabeled assets still classify", () => {
+    expect(sniffMimeFromBytes(bytesOf(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a))).toBe("image/png");
+    expect(sniffMimeFromBytes(bytesOf(0xff, 0xd8, 0xff, 0xe0))).toBe("image/jpeg");
+    expect(sniffMimeFromBytes(bytesOf(0x47, 0x49, 0x46, 0x38, 0x39, 0x61))).toBe("image/gif");
+    expect(sniffMimeFromBytes(bytesOf(0x25, 0x50, 0x44, 0x46, 0x2d))).toBe("application/pdf");
+    expect(sniffMimeFromBytes(bytesOf(0x00, 0x61, 0x73, 0x6d, 0x01, 0x00))).toBe("application/wasm");
+    expect(sniffMimeFromBytes(bytesOf(0x77, 0x4f, 0x46, 0x32, 0, 0))).toBe("font/woff2");
+    expect(sniffMimeFromBytes(bytesOf(0x67, 0x6c, 0x54, 0x46, 0x02, 0))).toBe("model/gltf-binary");
+  });
+
+  it("reads RIFF and ISO-BMFF container brands", () => {
+    const webp = new Uint8Array(16);
+    webp.set(textBytes("RIFF"), 0);
+    webp.set(textBytes("WEBP"), 8);
+    expect(sniffMimeFromBytes(webp)).toBe("image/webp");
+
+    const mp4 = new Uint8Array(16);
+    mp4.set([0x00, 0x00, 0x00, 0x18], 0);
+    mp4.set(textBytes("ftyp"), 4);
+    mp4.set(textBytes("isom"), 8);
+    expect(sniffMimeFromBytes(mp4)).toBe("video/mp4");
+
+    const avif = new Uint8Array(16);
+    avif.set([0x00, 0x00, 0x00, 0x1c], 0);
+    avif.set(textBytes("ftyp"), 4);
+    avif.set(textBytes("avif"), 8);
+    expect(sniffMimeFromBytes(avif)).toBe("image/avif");
+  });
+
+  it("detects SVG and JSON text payloads", () => {
+    expect(sniffMimeFromBytes(textBytes('<svg xmlns="http://www.w3.org/2000/svg"></svg>'))).toBe("image/svg+xml");
+    expect(sniffMimeFromBytes(textBytes('  {"hello":"world"}'))).toBe("application/json");
+  });
+
+  it("returns undefined for unrecognized or too-short input", () => {
+    expect(sniffMimeFromBytes(bytesOf(0x12))).toBeUndefined();
+    expect(sniffMimeFromBytes(textBytes("just some plain prose that is not an asset"))).toBeUndefined();
+  });
+
+  it("treats missing/octet-stream/text-plain as generic, real types as specific", () => {
+    expect(isGenericMime(undefined)).toBe(true);
+    expect(isGenericMime("application/octet-stream")).toBe(true);
+    expect(isGenericMime("text/plain; charset=utf-8")).toBe(true);
+    expect(isGenericMime("image/png")).toBe(false);
+  });
+
+  it("lets a sniffed image MIME drive classification end to end", () => {
+    const sniffed = sniffMimeFromBytes(bytesOf(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a));
+    expect(classifyAsset({ url: "https://cdn.example.com/objects/9f3ab2", mime: sniffed })).toBe("image");
   });
 });
 
