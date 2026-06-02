@@ -65,6 +65,10 @@ Goal: most comprehensive + intelligent asset-capture extension. Adversarial agen
 - Round 4 (wyn70oa0p): 1 finding (unbounded requests table) -> fixed (ab8e4f7): per-session cap +
   try/catch + header redaction at rest. Visually verified compact/popup streams + PDF document kind.
 - Round 5 (weassbpfr): CONVERGED-CLEAN — zero must-fix findings. Loop converged (20->14->11->1->0).
-- Iteration 6 (dep-free comprehensiveness): archive entry listing (existing fflate dep), image
-  dimensions in preview. Then final adversarial check + consolidated report.
-- Standing deferred (need NEW dep / user approval): hls.js playable preview; list virtualizer.
+- Iteration 6 (7753c49): archive entry listing (zip-bomb-safe via fflate filter), image dimensions.
+  Targeted adversarial review of the new code: CLEAN (verified vs fflate internals).
+- PR #1 description refreshed to full scope.
+- STATE: converged-clean, 41 tests, build green, ~22 commits. Branch work/audit-ui-hardening.
+- Standing deferred (need NEW dep / user approval, NOT done autonomously per supply-chain cooldown):
+  hls.js playable stream preview; true list virtualizer (@tanstack/react-virtual) for 5k+ assets.
+  Also intentionally out of scope: SSE/EventSource capture (data stream, not downloadable assets).
