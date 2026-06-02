@@ -49,4 +49,11 @@ Goal: most comprehensive + intelligent asset-capture extension. Adversarial agen
   full-byte sniff, mime-clobber guard, DASH AdaptationSet, namespaced DRM, selection prune,
   bulk count, sort tiebreaker, windowing deps, image probe timeout, non-ok text error, image-set,
   url() regex, size threshold, json/mp3/m4a sniff). 39 tests. Visually verified streams + HEIC card.
-- Iteration 2: launching adversarial round 2 (regressions from the 20 fixes + new coverage frontiers).
+- Adversarial round 2 (wdhwbkdit): 14 findings.
+- Round-2 fixes (9fdaba3): 12 implemented (export/FETCH_TEXT body redaction [CRITICAL], postMessage origin,
+  scheme allowlist, debugger meta level + tab-scoped keys + detach purge, takeRecords on reobserve,
+  selection-prune empty guard, FETCH_TEXT streaming, MSE buffer release, HAR map, PDF document kind +
+  embed preview, WebSocket binary-frame capture, resolved clickable variant URIs). 40 tests.
+  DEFERRED (need new dep -> 7-day cooldown / user approval): hls.js playable stream preview;
+  true list virtualizer for 5k+ assets (current windowing covers typical sessions).
+- Iteration 3: adversarial verification round (confirm round-2 fixes, deep correctness/security sweep).
