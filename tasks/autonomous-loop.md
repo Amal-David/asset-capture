@@ -35,4 +35,13 @@ Goal: most comprehensive + intelligent asset-capture extension. Adversarial agen
 - [ ] 16 (high/L) MSE hooks: SourceBuffer.appendBuffer capture + MediaSource blob→video; segment assemble
 
 ## Progress log
-- Iteration 1 start: backlog created. Implementing cluster A first.
+- Iteration 1: backlog created (16 items / 8 clusters) from adversarial recon.
+- A done (f771733): magic-byte sniffer + resourceType classification.
+- B1 done (6388626): multi-select kinds, status/bytes/previewable/domain facets, client sort.
+- B2 done (cdffbb6): multi-select rows + bulk actions, keyboard nav, windowing, popup cap. Visually verified.
+- C done (2f044c9): CSSOM sweep, shadow DOM, SVG sprites, lazyload, SPA auto-rescan.
+- rank10 tail (6332fbd): manual Rescan button.
+- E done (641d47f): render-probe (render-or-hide), object URLs, SW FETCH_TEXT for text.
+- F done (77ab385): Streams panel + HLS/DASH manifest parser (+tests).
+- Remaining: Cluster G (rank 15 debugger getResponseBody, rank 16 MSE/appendBuffer).
+- Running adversarial verification workflow on A-F; then implement G + fix verified findings.

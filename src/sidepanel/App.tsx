@@ -156,7 +156,7 @@ export function App({ compact = false, tabId }: AppProps) {
                 {assets.length} asset{assets.length === 1 ? "" : "s"}
                 {bytesCount > 0 && <span> · {bytesCount} with bytes</span>}
                 {blobCount > 0 && <span> · {blobCount} blob{blobCount === 1 ? "" : "s"}</span>}
-                {mediaCount > 0 && <span> · {mediaCount} stream{mediaCount === 1 ? "" : "s"}</span>}
+                {!compact && mediaCount > 0 && <span> · {mediaCount} stream{mediaCount === 1 ? "" : "s"}</span>}
                 {snapshot?.deepCaptureAttached && <span className="text-accent"> · deep</span>}
               </p>
             </div>
@@ -255,9 +255,9 @@ export function App({ compact = false, tabId }: AppProps) {
       )}
       {lastExport && <ExportNotice job={lastExport} />}
 
-      {selectedIds.size > 0 && (
+      {sorted.some((a) => selectedIds.has(a.id)) && (
         <BulkBar
-          count={selectedIds.size}
+          count={sorted.filter((a) => selectedIds.has(a.id)).length}
           onSelectAll={() => selectMany(sorted.map((a) => a.id))}
           onClear={clearSelection}
           onCopyUrls={() => {
@@ -635,7 +635,10 @@ function AssetList({ assets, compact, loading, hasAssets, onSelect, onContextMen
     }, { rootMargin: "400px" });
     io.observe(node);
     return () => io.disconnect();
-  }, [hasMore, assets.length]);
+    // `visible` is a dep so the observer re-attaches after each growth step — an IO
+    // only fires on transitions, so without this a sentinel that stays inside the
+    // rootMargin would never trigger a second load.
+  }, [hasMore, assets.length, visible]);
 
   const flashRef = useCallback((node: HTMLLIElement | null) => {
     if (node) node.scrollIntoView({ behavior: "smooth", block: "center" });
@@ -898,7 +901,10 @@ function PreviewDrawer({ asset, compact, onClose, onContextMenu }: { asset: Asse
 }
 
 const TEXT_KINDS: AssetKind[] = ["json", "api", "manifest", "subtitle", "css"];
-const LARGE_PREVIEW_BYTES = 30 * 1024 * 1024;
+// Matches the capture ceiling (page-hooks/service-worker MAX_BODY_BYTES) so the
+// "too large to preview" guard reflects the real limit rather than implying
+// support for sizes that are never stored.
+const LARGE_PREVIEW_BYTES = 16 * 1024 * 1024;
 
 // Orchestrates "render-or-hide": acquire a source (captured bytes preferred as an
 // object URL), then probe whether it actually decodes before showing it. Anything
@@ -968,10 +974,11 @@ function usePreviewProbe(kind: "image" | "video" | "audio", src: string): "loadi
     const settle = (ok: boolean) => { if (!cancelled) setState(ok ? "ready" : "failed"); };
     if (kind === "image") {
       const img = new Image();
-      img.onload = () => settle(true);
-      img.onerror = () => settle(false);
+      const timer = window.setTimeout(() => settle(false), 12000); // stalled CDN image
+      img.onload = () => { window.clearTimeout(timer); settle(true); };
+      img.onerror = () => { window.clearTimeout(timer); settle(false); };
       img.src = src;
-      return () => { cancelled = true; img.onload = null; img.onerror = null; };
+      return () => { cancelled = true; window.clearTimeout(timer); img.onload = null; img.onerror = null; };
     }
     const el = document.createElement(kind);
     el.preload = "metadata";
@@ -996,10 +1003,11 @@ function ProbedPreview({ kind, src, asset }: { kind: "image" | "video" | "audio"
   return <audio src={src} controls preload="metadata" className="w-full" />;
 }
 
-function TextPreviewLoader({ asset, objectUrl, waiting, fetchText }: { asset: AssetRecord; objectUrl: string | null; waiting: boolean; fetchText: (url: string, tabId?: number) => Promise<{ content: string; truncated: boolean; ok: boolean } | null> }) {
+function TextPreviewLoader({ asset, objectUrl, waiting, fetchText }: { asset: AssetRecord; objectUrl: string | null; waiting: boolean; fetchText: (url: string, tabId?: number) => Promise<{ content: string; truncated: boolean; ok: boolean; status?: number } | null> }) {
   const [content, setContent] = useState<string | null>(null);
   const [truncated, setTruncated] = useState(false);
   const [state, setState] = useState<"loading" | "ready" | "error" | "empty">("loading");
+  const [errorDesc, setErrorDesc] = useState("The text response couldn't be read (blocked, errored, or offline).");
 
   useEffect(() => {
     if (waiting) return;
@@ -1024,7 +1032,10 @@ function TextPreviewLoader({ asset, objectUrl, waiting, fetchText }: { asset: As
         // aren't blocked by the sidepanel origin's CORS.
         const res = await fetchText(asset.url);
         if (cancelled) return;
-        if (!res || (!res.ok && !res.content)) { setState("error"); return; }
+        if (!res) { setState("error"); return; }
+        // A non-ok status often returns a non-empty error page; that is NOT the
+        // asset's content, so surface it as an error with the status code.
+        if (!res.ok) { setErrorDesc(`Server returned ${res.status ?? "an error"} — the body is an error page, not the asset.`); setState("error"); return; }
         if (!res.content) { setState("empty"); return; }
         setContent(pretty(res.content)); setTruncated(res.truncated); setState("ready");
       } catch {
@@ -1036,7 +1047,7 @@ function TextPreviewLoader({ asset, objectUrl, waiting, fetchText }: { asset: As
   }, [asset.id, asset.url, asset.kind, objectUrl, waiting, fetchText]);
 
   if (waiting || state === "loading") return <Spinner label="Loading…" />;
-  if (state === "error") return <FailCard asset={asset} title="Couldn't load content" desc="The text response couldn't be read (blocked, opaque, or offline)." />;
+  if (state === "error") return <FailCard asset={asset} title="Couldn't load content" desc={errorDesc} />;
   if (state === "empty") return <span className="text-sm text-slate-400">Empty response</span>;
   return <TextPreview content={content} truncated={truncated} />;
 }
@@ -1218,11 +1229,13 @@ function compareAssets(a: AssetRecord, b: AssetRecord, key: SortKey, dir: number
   const bv = sortValue(b, key);
   const aMissing = av === undefined || av === "";
   const bMissing = bv === undefined || bv === "";
-  if (aMissing && bMissing) return 0;
+  // Direction-independent tiebreaker on id so ties don't reshuffle as updatedAt
+  // churns under the 1.5s refresh (the rendered order stays a pure function of the set).
+  if (aMissing && bMissing) return a.id.localeCompare(b.id);
   if (aMissing) return 1;
   if (bMissing) return -1;
-  if (typeof av === "string" && typeof bv === "string") return dir * av.localeCompare(bv);
-  return dir * (Number(av) - Number(bv));
+  const primary = typeof av === "string" && typeof bv === "string" ? dir * av.localeCompare(bv) : dir * (Number(av) - Number(bv));
+  return primary !== 0 ? primary : a.id.localeCompare(b.id);
 }
 
 function sortValue(asset: AssetRecord, key: SortKey): string | number | undefined {

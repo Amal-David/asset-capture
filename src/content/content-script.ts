@@ -24,11 +24,15 @@ let flushTimer: number | undefined;
 let styleDirty = true;
 let lastScannedUrl = location.href;
 const dirtyElements = new Set<Element>();
-const observedRoots = new WeakSet<ShadowRoot>();
+// Tracked in a real Set (not WeakSet) so we can prune detached roots: a
+// MutationObserver strongly pins every observed node, so without pruning,
+// component-churning SPAs would leak every shadow root ever seen.
+const observedRoots = new Set<ShadowRoot>();
 
 const observer = new MutationObserver(handleMutations);
 
-injectPageHooks();
+// page-hooks now runs as a MAIN-world content script at document_start (manifest),
+// so it patches page APIs before parse-time scripts — no manual injection needed.
 scheduleScan();
 observer.observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: OBSERVED_ATTRS });
 installSpaRescan();
@@ -108,7 +112,21 @@ function scanDom(): void {
 
   scanStylesheets(assets, adopted);
   styleDirty = false;
+  reobserveLiveRoots();
   sendAssetBatch(dedupeAssets(assets), dedupeMedia(media));
+}
+
+// Drop observation of shadow roots whose host has been removed, so the observer
+// stops pinning detached subtrees. Cheap because it only runs on full scans.
+function reobserveLiveRoots(): void {
+  let pruned = false;
+  for (const root of observedRoots) {
+    if (!root.host?.isConnected) { observedRoots.delete(root); pruned = true; }
+  }
+  if (!pruned) return;
+  observer.disconnect();
+  observer.observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: OBSERVED_ATTRS });
+  for (const root of observedRoots) observer.observe(root, { childList: true, subtree: true, attributes: true, attributeFilter: OBSERVED_ATTRS });
 }
 
 function flushDirty(): void {
@@ -269,14 +287,6 @@ if ("PerformanceObserver" in window) {
   } catch {
     // Some pages disable resource timing observation; DOM and webRequest capture still continue.
   }
-}
-
-function injectPageHooks(): void {
-  const script = document.createElement("script");
-  script.src = chrome.runtime.getURL("src/content/page-hooks.ts");
-  script.async = false;
-  script.onload = () => script.remove();
-  (document.documentElement || document.head).appendChild(script);
 }
 
 function assetFromPerformanceEntry(entry: PerformanceResourceTiming): AssetDraft | undefined {

@@ -105,6 +105,14 @@ export const useInspectorStore = create<InspectorState>((set, get) => ({
         updates.pickerResult = response.pickerResult;
         updates.pickerActive = false;
       }
+      // Prune selection against the live snapshot so deterministic re-captured ids
+      // can never silently re-attach a stale selection to assets the user didn't pick.
+      const selected = get().selectedIds;
+      if (selected.size) {
+        const live = new Set(response.snapshot.assets.map((asset) => asset.id));
+        const pruned = new Set([...selected].filter((id) => live.has(id)));
+        if (pruned.size !== selected.size) updates.selectedIds = pruned;
+      }
       set(updates);
     } else {
       set({ error: response.ok ? "Unexpected response" : response.error, loading: false });
@@ -124,6 +132,7 @@ export const useInspectorStore = create<InspectorState>((set, get) => ({
       set({ error: response.error });
       return;
     }
+    set({ selectedIds: new Set<string>() });
     await get().refresh(tabId);
   },
   exportAs: async (type, tabId, selectedIds) => {

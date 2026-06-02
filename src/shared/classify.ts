@@ -240,10 +240,10 @@ export function sniffMimeFromBytes(bytes: Uint8Array): string | undefined {
 
   // ISO-BMFF "ftyp" box: mp4 / avif / heic / quicktime / m4a
   if (asciiAt(bytes, 4, 4) === "ftyp") {
-    const brand = asciiAt(bytes, 8, 4);
+    const brand = asciiAt(bytes, 8, 4).toLowerCase();
     if (brand.startsWith("avif") || brand.startsWith("avis")) return "image/avif";
     if (["heic", "heix", "heim", "heis", "hevc", "mif1", "msf1"].includes(brand)) return "image/heic";
-    if (brand.startsWith("M4A")) return "audio/mp4";
+    if (brand.startsWith("m4a") || brand.startsWith("m4b")) return "audio/mp4";
     if (brand === "qt  ") return "video/quicktime";
     return "video/mp4";
   }
@@ -260,7 +260,13 @@ export function sniffMimeFromBytes(bytes: Uint8Array): string | undefined {
 
   // Audio
   if (hasSignature(bytes, [0x49, 0x44, 0x33])) return "audio/mpeg"; // ID3-tagged mp3
-  if (bytes[0] === 0xff && (bytes[1]! & 0xe0) === 0xe0) return "audio/mpeg"; // MPEG audio frame sync
+  // MPEG audio frame: 11 sync bits + valid version (!=01 reserved), layer (!=00
+  // reserved) and bitrate index (1..14) — avoids matching e.g. a 0xFFFF blob.
+  if (
+    bytes[0] === 0xff && (bytes[1]! & 0xe0) === 0xe0 &&
+    ((bytes[1]! & 0x18) >> 3) !== 1 && ((bytes[1]! & 0x06) >> 1) !== 0 &&
+    ((bytes[2]! >> 4) & 0x0f) >= 1 && ((bytes[2]! >> 4) & 0x0f) <= 14
+  ) return "audio/mpeg";
   if (asciiAt(bytes, 0, 4) === "OggS") return "application/ogg";
   if (asciiAt(bytes, 0, 4) === "fLaC") return "audio/flac";
 
@@ -283,9 +289,9 @@ export function sniffMimeFromBytes(bytes: Uint8Array): string | undefined {
   // Guarded text probe (only meaningful because callers sniff generic MIMEs):
   // detect SVG and JSON, which are very commonly served as octet-stream/text.
   const head = new TextDecoder("utf-8", { fatal: false }).decode(bytes.subarray(0, Math.min(bytes.length, 512))).trimStart();
-  if (/^<\?xml/i.test(head) && /<svg[\s>]/i.test(head)) return "image/svg+xml";
-  if (/^<svg[\s>]/i.test(head)) return "image/svg+xml";
-  if (/^[[{]/.test(head)) return "application/json";
+  if (/<svg[\s>]/i.test(head)) return "image/svg+xml";
+  // Require a JSON-ish second token so prose beginning with a brace isn't mislabeled.
+  if (/^[[{]\s*(["\d\-[\]{}]|true|false|null)/.test(head)) return "application/json";
 
   return undefined;
 }

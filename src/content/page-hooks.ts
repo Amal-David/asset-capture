@@ -20,6 +20,35 @@
 
   const textToBuffer = (value: string): ArrayBuffer => new TextEncoder().encode(value).buffer;
 
+  // Read a response body incrementally and abort the moment it exceeds the cap, so
+  // an unbounded/chunked stream (NDJSON, log tail, streamed export) can't buffer the
+  // whole thing into memory via clone().arrayBuffer() before the size check.
+  const readCapped = async (response: Response, key: string, mime: string | undefined) => {
+    if (!response.body) {
+      try { postBody(key, mime, await response.arrayBuffer()); } catch { /* ignore */ }
+      return;
+    }
+    const reader = response.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (!value) continue;
+        total += value.byteLength;
+        if (total > MAX_BODY_BYTES) { void reader.cancel(); return; }
+        chunks.push(value);
+      }
+    } catch {
+      return;
+    }
+    const merged = new Uint8Array(total);
+    let offset = 0;
+    for (const chunk of chunks) { merged.set(chunk, offset); offset += chunk.byteLength; }
+    postBody(key, mime, merged.buffer);
+  };
+
   // MSE plumbing: adaptive players (YouTube/Twitch/HTML5 video) feed a MediaSource
   // via createObjectURL and push segments through SourceBuffer.appendBuffer. We map
   // MediaSource -> blob URL, accumulate appended segments, and post them so the
@@ -123,9 +152,7 @@
       // skip video/audio, which are the large unbounded streams worth avoiding.
       const isStreamableMedia = (mime ?? "").startsWith("video/") || (mime ?? "").startsWith("audio/");
       const shouldRead = declared ? declared <= MAX_BODY_BYTES : !isStreamableMedia;
-      if (shouldRead) {
-        void response.clone().arrayBuffer().then((buffer) => postBody(url, mime, buffer)).catch(() => undefined);
-      }
+      if (shouldRead) void readCapped(response.clone(), url, mime);
     }
     return response;
   };

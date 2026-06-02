@@ -58,19 +58,37 @@ export function parseDashManifest(text: string): ParsedManifest {
   const resolutions = new Set<string>();
   const codecs = new Set<string>();
 
-  for (const match of text.matchAll(/<Representation\b[^>]*>/gi)) {
-    const tag = match[0];
-    const width = /\bwidth="(\d+)"/i.exec(tag)?.[1];
-    const height = /\bheight="(\d+)"/i.exec(tag)?.[1];
-    const codec = /\bcodecs="([^"]+)"/i.exec(tag)?.[1];
-    const bandwidth = /\bbandwidth="(\d+)"/i.exec(tag)?.[1];
-    const resolution = width && height ? `${width}x${height}` : undefined;
-    if (resolution) resolutions.add(resolution);
-    if (codec) codecs.add(codec);
-    variants.push({ resolution, bandwidth: bandwidth ? Number(bandwidth) : undefined, codecs: codec });
+  const attrs = (tag: string) => ({
+    width: /\bwidth="(\d+)"/i.exec(tag)?.[1],
+    height: /\bheight="(\d+)"/i.exec(tag)?.[1],
+    codecs: /\bcodecs="([^"]+)"/i.exec(tag)?.[1],
+    bandwidth: /\bbandwidth="(\d+)"/i.exec(tag)?.[1]
+  });
+
+  // In the dominant live/SegmentTemplate profile, width/height/codecs live on the
+  // parent <AdaptationSet> while Representations carry only id/bandwidth. Parse each
+  // AdaptationSet block and let its Representations inherit the set-level defaults.
+  const blocks = [...text.matchAll(/<AdaptationSet\b[^>]*>([\s\S]*?)<\/AdaptationSet>/gi)];
+  const scopes = blocks.length ? blocks.map((b) => ({ openTag: b[0].slice(0, b[0].indexOf(">") + 1), inner: b[1] ?? "" })) : [{ openTag: "", inner: text }];
+
+  for (const scope of scopes) {
+    const defaults = attrs(scope.openTag);
+    const reps = [...scope.inner.matchAll(/<Representation\b[^>]*>/gi)];
+    const list = reps.length ? reps.map((r) => r[0]) : (scope.openTag ? [scope.openTag] : []);
+    for (const tag of list) {
+      const a = attrs(tag);
+      const width = a.width ?? defaults.width;
+      const height = a.height ?? defaults.height;
+      const codec = a.codecs ?? defaults.codecs;
+      const resolution = width && height ? `${width}x${height}` : undefined;
+      if (resolution) resolutions.add(resolution);
+      if (codec) codecs.add(codec);
+      variants.push({ resolution, bandwidth: a.bandwidth ? Number(a.bandwidth) : undefined, codecs: codec });
+    }
   }
 
-  const drmDetected = /<ContentProtection\b/i.test(text);
+  // Match optional namespace prefix, e.g. <cenc:ContentProtection> / <mas:...>.
+  const drmDetected = /<(?:[\w-]+:)?ContentProtection\b/i.test(text);
   return { type: "dash", variants, resolutions: [...resolutions], codecs: [...codecs], drmDetected };
 }
 

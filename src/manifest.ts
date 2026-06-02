@@ -35,12 +35,16 @@ export const manifest = defineManifest({
       js: ["src/content/content-script.ts"],
       run_at: "document_start",
       all_frames: true
-    }
-  ],
-  web_accessible_resources: [
+    },
     {
-      resources: ["src/content/page-hooks.ts"],
-      matches: ["<all_urls>"]
+      // Page-world hooks must patch fetch/XHR/createObjectURL/attachShadow/history
+      // BEFORE the page's own parse-time scripts run, so they execute in the MAIN
+      // world at document_start rather than being injected asynchronously later.
+      matches: ["<all_urls>"],
+      js: ["src/content/page-hooks.ts"],
+      run_at: "document_start",
+      all_frames: true,
+      world: "MAIN"
     }
   ]
 });

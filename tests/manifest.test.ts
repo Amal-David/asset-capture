@@ -52,4 +52,24 @@ describe("parseDashManifest", () => {
     expect(parsed.resolutions).toEqual(expect.arrayContaining(["1920x1080", "1280x720"]));
     expect(parsed.drmDetected).toBe(true);
   });
+
+  it("inherits AdaptationSet-level width/height/codecs (SegmentTemplate live profile)", () => {
+    const mpd = `<MPD><Period>
+      <AdaptationSet width="1920" height="1080" codecs="avc1.640028">
+        <SegmentTemplate media="$Number$.m4s"/>
+        <Representation id="v0" bandwidth="6000000"/>
+      </AdaptationSet>
+    </Period></MPD>`;
+    const parsed = parseDashManifest(mpd);
+    expect(parsed.resolutions).toContain("1920x1080");
+    expect(parsed.codecs).toContain("avc1.640028");
+  });
+
+  it("detects DRM via a namespace-prefixed ContentProtection element", () => {
+    const mpd = `<MPD><Period><AdaptationSet>
+      <cenc:ContentProtection schemeIdUri="urn:uuid:edef8ba9-79d6-4ace-a3c8-27dcd51d21ed"/>
+      <Representation id="1" width="640" height="360" codecs="avc1.42e01e"/>
+    </AdaptationSet></Period></MPD>`;
+    expect(parseDashManifest(mpd).drmDetected).toBe(true);
+  });
 });

@@ -222,8 +222,9 @@ async function handleMessage(message: RuntimeMessage, sender: chrome.runtime.Mes
     // (CDN manifests, subtitles, APIs) the sidepanel origin can't. credentials are
     // omitted so we never re-trigger authenticated side effects.
     try {
+      // host_permissions grant cross-origin reads, so this is a normal cors/basic
+      // response (never opaque); real failures throw to the catch below.
       const response = await fetch(message.url, { credentials: "omit" });
-      if (response.type === "opaque") return { ok: true, text: { content: "", truncated: false, ok: false } };
       const raw = await response.text();
       const LIMIT = 200_000;
       const truncated = raw.length > LIMIT;
@@ -405,7 +406,9 @@ async function persistAssetBody(input: {
   // Intelligent detection: when the wire MIME is missing/generic, trust the
   // bytes. This rescues mislabeled assets (octet-stream images, extensionless
   // CDN/object-store URLs) that would otherwise be unclassified & unpreviewable.
-  const sniffed = isGenericMime(declaredMime) ? sniffMimeFromBytes(bytes.subarray(0, 64)) : undefined;
+  // Pass the full buffer: binary signatures are read at offset 0, but the SVG/JSON
+  // text probe needs the first ~512 bytes (a real SVG's <svg> trails its XML prolog).
+  const sniffed = isGenericMime(declaredMime) ? sniffMimeFromBytes(bytes) : undefined;
   const mime = sniffed ?? declaredMime ?? "application/octet-stream";
   try {
     await db.assetBodies.put({ assetId, sessionId, mime, bytes, byteLength: bytes.byteLength, createdAt: Date.now() });
@@ -505,9 +508,12 @@ async function upsertAsset(input: Partial<AssetRecord> & Pick<AssetRecord, "sess
   return db.transaction("rw", db.assets, async () => {
     const existing = await db.assets.get(id);
     const resourceType = input.resourceType ?? existing?.resourceType;
+    // A later generic wire MIME (e.g. octet-stream from a webRequest phase) must not
+    // clobber a byte-sniffed specific MIME already stored, nor downgrade kind to binary.
+    const effectiveMime = input.mime && !isGenericMime(input.mime) ? input.mime : existing?.mime ?? input.mime;
     // Prefer the real webRequest resourceType (image/media/font/xmlhttprequest/…)
     // over the capture-source label so the classifier's resourceType branches fire.
-    const kind = input.kind ?? classifyAsset({ url: input.url, mime: input.mime, resourceType: resourceType ?? input.sources[0], sources: input.sources });
+    const kind = input.kind ?? classifyAsset({ url: input.url, mime: effectiveMime, resourceType: resourceType ?? input.sources[0], sources: input.sources });
     const mergedSources = Array.from(new Set([...(existing?.sources ?? []), ...input.sources]));
     const record: AssetRecord = {
       id,
@@ -517,7 +523,7 @@ async function upsertAsset(input: Partial<AssetRecord> & Pick<AssetRecord, "sess
       url: input.url,
       originalUrl: input.originalUrl ?? existing?.originalUrl,
       kind,
-      mime: input.mime ?? existing?.mime,
+      mime: effectiveMime,
       extension: input.extension ?? existing?.extension ?? getExtension(input.url),
       method: input.method ?? existing?.method,
       status: input.status ?? existing?.status,

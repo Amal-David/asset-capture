@@ -37,10 +37,20 @@ export function parseSrcset(srcset: string): string[] {
 }
 
 export function extractCssUrls(style: string, baseUrl: string): string[] {
-  return Array.from(style.matchAll(/url\((['"]?)(.*?)\1\)/gi))
-    .map((match) => match[2])
-    .filter(Boolean)
-    .map((url) => normalizeUrl(url, baseUrl));
+  const urls: string[] = [];
+  // Quoted or unquoted url(...) — split cases so a quoted value can contain ')'.
+  for (const match of style.matchAll(/url\(\s*(?:'([^']*)'|"([^"]*)"|([^)]*?))\s*\)/gi)) {
+    const raw = (match[1] ?? match[2] ?? match[3] ?? "").trim();
+    if (raw) urls.push(normalizeUrl(raw, baseUrl));
+  }
+  // image-set()/-webkit-image-set() entries may be bare quoted strings (not url()).
+  for (const set of style.matchAll(/image-set\(([^)]*(?:\([^)]*\)[^)]*)*)\)/gi)) {
+    for (const str of (set[1] ?? "").matchAll(/(['"])([^'"]+)\1/g)) {
+      const candidate = str[2]!.trim();
+      if (candidate && !/^image\//i.test(candidate)) urls.push(normalizeUrl(candidate, baseUrl));
+    }
+  }
+  return urls.filter(Boolean);
 }
 
 export function cssSelector(element: Element): string {
