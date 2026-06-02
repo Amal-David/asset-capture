@@ -18,6 +18,7 @@ export type AssetKind =
 export type CaptureSource =
   | "webRequest"
   | "dom"
+  | "css"
   | "performance"
   | "fetch"
   | "xhr"

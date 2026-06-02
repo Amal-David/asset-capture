@@ -114,6 +114,28 @@
     return Reflect.apply(originalSend, this, arguments);
   };
 
+  // Inspector aid: force shadow roots open so the content script can descend
+  // web components and capture imagery/fonts/sprites inside closed shadow DOM.
+  const originalAttachShadow = Element.prototype.attachShadow;
+  Element.prototype.attachShadow = function patchedAttachShadow(init: ShadowRootInit): ShadowRoot {
+    return originalAttachShadow.call(this, { ...init, mode: "open" });
+  };
+
+  // SPA route changes don't reload the document and pushState/replaceState emit
+  // no event; bridge them to a 'locationchange' the content script rescans on.
+  const fireLocationChange = () => window.dispatchEvent(new Event("locationchange"));
+  const originalPushState = history.pushState;
+  const originalReplaceState = history.replaceState;
+  history.pushState = function patchedPushState(this: History, ...args: Parameters<History["pushState"]>): void {
+    originalPushState.apply(this, args);
+    fireLocationChange();
+  };
+  history.replaceState = function patchedReplaceState(this: History, ...args: Parameters<History["replaceState"]>): void {
+    originalReplaceState.apply(this, args);
+    fireLocationChange();
+  };
+  window.addEventListener("popstate", fireLocationChange);
+
   const originalReadAsDataURL = FileReader.prototype.readAsDataURL;
   FileReader.prototype.readAsDataURL = function patchedReadAsDataURL(blob: Blob) {
     this.addEventListener(

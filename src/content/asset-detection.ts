@@ -1,16 +1,26 @@
 import { normalizeUrl } from "../shared/url";
 
+const XLINK_NS = "http://www.w3.org/1999/xlink";
+
 export function extractAssetUrls(element: Element, baseUrl: string): string[] {
   const urls: string[] = [];
 
-  for (const attr of ["src", "href", "poster", "data"]) {
+  for (const attr of ["src", "href", "poster", "data", "data-src", "data-lazy", "data-lazy-src", "data-original", "data-bg", "data-background", "data-poster", "data-thumb", "data-image"]) {
     const value = element.getAttribute(attr);
-    if (value) urls.push(normalizeUrl(value, baseUrl));
+    if (value && !value.startsWith("#")) urls.push(normalizeUrl(value, baseUrl));
   }
 
-  for (const attr of ["srcset", "imagesrcset"]) {
+  for (const attr of ["srcset", "imagesrcset", "data-srcset", "data-lazy-srcset"]) {
     const srcset = element.getAttribute(attr);
     if (srcset) parseSrcset(srcset).forEach((u) => urls.push(normalizeUrl(u, baseUrl)));
+  }
+
+  // SVG <image>/<use> reference assets via href / xlink:href.
+  const tag = element.tagName.toLowerCase();
+  if (tag === "image" || tag === "use") {
+    const href = element.getAttribute("href") || element.getAttributeNS(XLINK_NS, "href");
+    const clean = href && tag === "use" ? href.split("#")[0] : href;
+    if (clean) urls.push(normalizeUrl(clean, baseUrl));
   }
 
   const style = element.getAttribute("style");

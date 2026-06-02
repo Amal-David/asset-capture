@@ -112,18 +112,30 @@ function createOverlay() {
   return { host, highlight: hl, badge: bd, tooltip: tt };
 }
 
+// Walk up across shadow boundaries: when there is no parentElement we've hit a
+// shadow root, so continue from its host — otherwise picking inside a web
+// component would dead-end at the shadow boundary.
+function ascend(el: Element): Element | null {
+  if (el.parentElement) return el.parentElement;
+  const root = el.getRootNode();
+  return root instanceof ShadowRoot ? root.host : null;
+}
+
 function findAssetElement(el: Element | null): { element: Element; urls: string[] } | null {
   let current = el;
   while (current && current !== document.documentElement) {
     const urls = extractAssetUrls(current, location.href);
     if (urls.length > 0) return { element: current, urls };
-    current = current.parentElement;
+    current = ascend(current);
   }
   return null;
 }
 
 function onMouseMove(event: MouseEvent): void {
-  const target = document.elementFromPoint(event.clientX, event.clientY);
+  // composedPath()[0] pierces shadow DOM to the real element under the cursor;
+  // elementFromPoint only returns the shadow host.
+  const path = event.composedPath();
+  const target = (path[0] instanceof Element ? path[0] : document.elementFromPoint(event.clientX, event.clientY)) as Element | null;
   if (!target || target === shadowHost) {
     hideOverlay();
     return;
