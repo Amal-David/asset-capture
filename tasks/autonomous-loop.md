@@ -43,5 +43,10 @@ Goal: most comprehensive + intelligent asset-capture extension. Adversarial agen
 - rank10 tail (6332fbd): manual Rescan button.
 - E done (641d47f): render-probe (render-or-hide), object URLs, SW FETCH_TEXT for text.
 - F done (77ab385): Streams panel + HLS/DASH manifest parser (+tests).
-- Remaining: Cluster G (rank 15 debugger getResponseBody, rank 16 MSE/appendBuffer).
-- Running adversarial verification workflow on A-F; then implement G + fix verified findings.
+- G done (6c6400c): debugger getResponseBody + MSE appendBuffer capture. All 16 backlog items done.
+- Adversarial verify round 1 (wg42z3q61): 20 confirmed findings.
+- Fixes done (4fd7846): all 20 fixed (MAIN-world hooks, capped stream reader, shadow-root prune,
+  full-byte sniff, mime-clobber guard, DASH AdaptationSet, namespaced DRM, selection prune,
+  bulk count, sort tiebreaker, windowing deps, image probe timeout, non-ok text error, image-set,
+  url() regex, size threshold, json/mp3/m4a sniff). 39 tests. Visually verified streams + HEIC card.
+- Iteration 2: launching adversarial round 2 (regressions from the 20 fixes + new coverage frontiers).
