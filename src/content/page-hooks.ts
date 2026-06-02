@@ -57,7 +57,7 @@
   // <video src=blob:> asset becomes a real, classifiable, downloadable video.
   const mediaSourceUrls = new WeakMap<MediaSource, string>();
   const sourceBufferOwner = new WeakMap<SourceBuffer, MediaSource>();
-  const mseParts = new Map<string, { parts: Uint8Array[]; total: number; timer?: number }>();
+  const mseParts = new Map<string, { parts: Uint8Array[]; total: number; timer?: number; lastPosted?: number }>();
 
   const accumulateMse = (url: string, chunk: Uint8Array) => {
     let entry = mseParts.get(url);
@@ -68,6 +68,10 @@
     if (entry.timer) clearTimeout(entry.timer);
     const current = entry;
     entry.timer = window.setTimeout(() => {
+      // Re-post only on meaningful growth (>=1MB) so a long stream doesn't re-merge
+      // and re-encode the whole buffer on every appended segment.
+      if (current.lastPosted !== undefined && current.total - current.lastPosted < 1024 * 1024) return;
+      current.lastPosted = current.total;
       const cap = Math.min(current.total, MAX_BODY_BYTES);
       const merged = new Uint8Array(cap);
       let offset = 0;
@@ -140,22 +144,24 @@
   // frame as its own asset keyed by the socket URL.
   const OriginalWebSocket = window.WebSocket;
   if (OriginalWebSocket) {
-    const WrappedWebSocket = function (url: string | URL, protocols?: string | string[]) {
-      const socket = protocols === undefined ? new OriginalWebSocket(url) : new OriginalWebSocket(url, protocols);
-      const wsUrl = typeof url === "string" ? url : url.toString();
-      let frame = 0;
-      socket.addEventListener("message", (event: MessageEvent) => {
-        const data = event.data;
-        if (data instanceof ArrayBuffer) postBody(`${wsUrl}#ws-${frame++}`, undefined, data);
-        else if (typeof Blob !== "undefined" && data instanceof Blob) captureBlobBody(`${wsUrl}#ws-${frame++}`, data);
-      });
-      return socket;
-    } as unknown as typeof WebSocket;
-    WrappedWebSocket.prototype = OriginalWebSocket.prototype;
-    (["CONNECTING", "OPEN", "CLOSING", "CLOSED"] as const).forEach((key) => {
-      (WrappedWebSocket as unknown as Record<string, unknown>)[key] = (OriginalWebSocket as unknown as Record<string, unknown>)[key];
-    });
-    window.WebSocket = WrappedWebSocket;
+    // Cap binary frames per socket so a chatty realtime socket can't flood
+    // IndexedDB to its quota (which would silently drop all later captures).
+    const MAX_WS_FRAMES = 24;
+    // A real subclass preserves instanceof, static constants, and `extends`.
+    class WrappedWebSocket extends OriginalWebSocket {
+      constructor(url: string | URL, protocols?: string | string[]) {
+        super(url, protocols);
+        const wsUrl = typeof url === "string" ? url : url.toString();
+        let frame = 0;
+        this.addEventListener("message", (event: MessageEvent) => {
+          if (frame >= MAX_WS_FRAMES) return;
+          const data = event.data;
+          if (data instanceof ArrayBuffer) postBody(`${wsUrl}#ws-${frame++}`, undefined, data);
+          else if (typeof Blob !== "undefined" && data instanceof Blob) captureBlobBody(`${wsUrl}#ws-${frame++}`, data);
+        });
+      }
+    }
+    window.WebSocket = WrappedWebSocket as unknown as typeof WebSocket;
   }
 
   const originalFetch = window.fetch.bind(window);

@@ -43,7 +43,7 @@ interface InspectorState {
   setSortDir: (dir: SortDir) => void;
   toggleSortDir: () => void;
   resetFilters: () => void;
-  refresh: (tabId?: number) => Promise<void>;
+  refresh: (tabId?: number, silent?: boolean) => Promise<void>;
   rescan: (tabId?: number) => Promise<void>;
   clear: (tabId?: number) => Promise<void>;
   exportAs: (type: ExportJob["type"], tabId?: number, selectedIds?: string[]) => Promise<void>;
@@ -93,8 +93,10 @@ export const useInspectorStore = create<InspectorState>((set, get) => ({
   setSortDir: (sortDir) => set({ sortDir }),
   toggleSortDir: () => set((state) => ({ sortDir: state.sortDir === "asc" ? "desc" : "asc" })),
   resetFilters: () => set({ kinds: new Set<AssetKind>(), query: "", statusFilter: "all", onlyWithBytes: false, onlyPreviewable: false, domain: undefined }),
-  refresh: async (tabId) => {
-    set({ loading: true, error: undefined });
+  refresh: async (tabId, silent) => {
+    // The 1.5s background poll runs silently so it never clears an action error
+    // (failed download/export) or flickers the loading state before the user reads it.
+    if (!silent) set({ loading: true, error: undefined });
     const response = await sendMessage({ type: "GET_SNAPSHOT", tabId });
     if (response.ok && "snapshot" in response) {
       const updates: Partial<InspectorState> = { snapshot: response.snapshot, loading: false };
@@ -116,8 +118,10 @@ export const useInspectorStore = create<InspectorState>((set, get) => ({
         if (pruned.size !== selected.size) updates.selectedIds = pruned;
       }
       set(updates);
-    } else {
+    } else if (!silent) {
       set({ error: response.ok ? "Unexpected response" : response.error, loading: false });
+    } else {
+      set({ loading: false });
     }
   },
   rescan: async (tabId) => {

@@ -4,7 +4,7 @@ import { clearSession, db, getSnapshot, sessionIdForTab } from "../shared/db";
 import type { PickerResult, RuntimeMessage, RuntimeResponse } from "../shared/messages";
 import type { AssetRecord, BlobRecord, CaptureSource, MediaRecord, RequestEvent } from "../shared/types";
 import { base64ToBytes, getExtension, inferFrameOrigin, stableId } from "../shared/url";
-import { redactTextContent } from "../shared/redact";
+import { isTextLikeMime, redactTextContent } from "../shared/redact";
 
 const requestStarts = new Map<string, number>();
 const deepCaptureTabs = new Set<number>();
@@ -14,6 +14,28 @@ const pendingPickerResults = new Map<number, PickerResult>();
 chrome.runtime.onInstalled.addListener(() => {
   void chrome.sidePanel?.setPanelBehavior?.({ openPanelOnActionClick: true });
 });
+
+// onRemoved can be missed on crash/force-quit, leaving captured bytes (and any
+// recycled tab id inheriting them) on disk. Reconcile against live tabs at startup.
+chrome.runtime.onStartup.addListener(() => void pruneOrphanSessions());
+
+async function pruneOrphanSessions(): Promise<void> {
+  try {
+    const tabs = await chrome.tabs.query({});
+    const live = new Set(tabs.map((tab) => sessionIdForTab(tab.id)));
+    const orphan = (sessionId: string) => sessionId !== "tab-unknown" && !live.has(sessionId);
+    await Promise.all([
+      db.assets.filter((a) => orphan(a.sessionId)).delete(),
+      db.assetBodies.filter((b) => orphan(b.sessionId)).delete(),
+      db.blobs.filter((b) => orphan(b.sessionId)).delete(),
+      db.media.filter((m) => orphan(m.sessionId)).delete(),
+      db.requests.filter((r) => orphan(r.sessionId)).delete(),
+      db.exports.filter((e) => orphan(e.sessionId)).delete()
+    ]);
+  } catch {
+    // Best-effort cleanup; never block startup.
+  }
+}
 
 chrome.webRequest.onBeforeRequest.addListener(
   (details) => {
@@ -447,8 +469,23 @@ async function persistAssetBody(input: {
   // text probe needs the first ~512 bytes (a real SVG's <svg> trails its XML prolog).
   const sniffed = isGenericMime(declaredMime) ? sniffMimeFromBytes(bytes) : undefined;
   const mime = sniffed ?? declaredMime ?? "application/octet-stream";
+  // Redact secrets at the persistence boundary so EVERY reader (preview, the
+  // "copy as data URL" clipboard action, and cross-origin debugger bodies) is safe
+  // by construction — not just the ZIP export. Fatal decode leaves real binary
+  // (incl. binary mislabeled text/plain) byte-for-byte untouched.
+  let storedBytes = bytes;
+  let redactionFlags: string[] = [];
+  if (isTextLikeMime(mime)) {
+    try {
+      const { value, flags } = redactTextContent(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+      storedBytes = new TextEncoder().encode(value);
+      redactionFlags = flags;
+    } catch {
+      // Not valid UTF-8 → genuinely binary despite a text-ish MIME; keep raw.
+    }
+  }
   try {
-    await db.assetBodies.put({ assetId, sessionId, mime, bytes, byteLength: bytes.byteLength, createdAt: Date.now() });
+    await db.assetBodies.put({ assetId, sessionId, mime, bytes: storedBytes, byteLength: storedBytes.byteLength, createdAt: Date.now() });
   } catch {
     // Quota or storage failure must not break capture; the asset stays metadata-only.
     return;
@@ -462,11 +499,12 @@ async function persistAssetBody(input: {
     const kind = classifyAsset({ url: asset.url, mime: asset.mime, resourceType: asset.resourceType ?? asset.sources[0], sources: asset.sources });
     asset.kind = kind;
     asset.previewAvailable = isPreviewableKind(kind);
+    if (redactionFlags.length) asset.redactionFlags = Array.from(new Set([...asset.redactionFlags, ...redactionFlags]));
     asset.updatedAt = Date.now();
   });
   if (updated > 0) return;
   // Body may arrive before the metadata event; create the asset so it is visible.
-  await upsertAsset({ sessionId, tabId, url: key, mime, initiator: pageUrl, sources: [source], bodyAvailable: true });
+  await upsertAsset({ sessionId, tabId, url: key, mime, initiator: pageUrl, sources: [source], bodyAvailable: true, redactionFlags });
 }
 
 async function recordRequest(

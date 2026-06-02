@@ -9,7 +9,9 @@ import { bytesToBase64, safeFilename, stableId } from "./url";
 function redactBodyBytes(bytes: Uint8Array, mime: string | undefined, summary: Set<string>): Uint8Array {
   if (!isTextLikeMime(mime)) return bytes;
   try {
-    const { value, flags } = redactTextContent(new TextDecoder().decode(bytes));
+    // Fatal decode: binary mislabeled text/plain throws and passes through
+    // byte-for-byte instead of being corrupted by a lossy round-trip.
+    const { value, flags } = redactTextContent(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
     flags.forEach((flag) => summary.add(flag));
     return textBytes(value);
   } catch {

@@ -78,7 +78,7 @@ export function App({ compact = false, tabId }: AppProps) {
   }, [refresh, tabId]);
 
   useEffect(() => {
-    const timer = window.setInterval(() => void refresh(activeTabId), 1500);
+    const timer = window.setInterval(() => void refresh(activeTabId, true), 1500);
     return () => window.clearInterval(timer);
   }, [activeTabId, refresh]);
 
@@ -163,7 +163,7 @@ export function App({ compact = false, tabId }: AppProps) {
                 {assets.length} asset{assets.length === 1 ? "" : "s"}
                 {bytesCount > 0 && <span> · {bytesCount} with bytes</span>}
                 {blobCount > 0 && <span> · {blobCount} blob{blobCount === 1 ? "" : "s"}</span>}
-                {!compact && mediaCount > 0 && <span> · {mediaCount} stream{mediaCount === 1 ? "" : "s"}</span>}
+                {mediaCount > 0 && <span> · {mediaCount} stream{mediaCount === 1 ? "" : "s"}</span>}
                 {snapshot?.deepCaptureAttached && <span className="text-accent"> · deep</span>}
               </p>
             </div>
@@ -255,7 +255,7 @@ export function App({ compact = false, tabId }: AppProps) {
         />
       )}
 
-      {!compact && mediaCount > 0 && <StreamsPanel media={media} tabId={activeTabId} />}
+      {mediaCount > 0 && <StreamsPanel media={media} tabId={activeTabId} />}
 
       {error && (
         <div className="mx-4 mt-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{error}</div>
@@ -639,13 +639,16 @@ function BulkButton({ icon, label, onClick }: { icon: React.ReactNode; label: st
 
 function AssetList({ assets, compact, loading, hasAssets, onSelect, onContextMenu, selectedId, flashId, selectedIds, onToggleSelect }: { assets: AssetRecord[]; compact: boolean; loading: boolean; hasAssets: boolean; onSelect: (asset: AssetRecord) => void; onContextMenu: (event: React.MouseEvent, asset: AssetRecord) => void; selectedId?: string; flashId?: string | null; selectedIds: Set<string>; onToggleSelect: (id: string) => void }) {
   const [visible, setVisible] = useState(WINDOW_STEP);
-  const [focusIndex, setFocusIndex] = useState(0);
+  // Track keyboard focus by asset id (not index) so the ring follows the asset
+  // across sort/filter reorders and never silently retargets after a shrink.
+  const [focusedId, setFocusedId] = useState<string | null>(null);
   const sentinelRef = useRef<HTMLLIElement>(null);
   const listRef = useRef<HTMLUListElement>(null);
 
   const shown = compact ? assets.slice(0, POPUP_CAP) : assets.slice(0, visible);
   const hasMore = !compact && assets.length > visible;
   const truncatedPopup = compact && assets.length > POPUP_CAP;
+  const focusIndex = shown.findIndex((asset) => asset.id === focusedId);
 
   // Grow the window as the sentinel scrolls into view — keeps thousands of
   // assets responsive without rendering them all or pulling in a virtualizer dep.
@@ -670,19 +673,17 @@ function AssetList({ assets, compact, loading, hasAssets, onSelect, onContextMen
     if (!shown.length) return;
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
       event.preventDefault();
-      setFocusIndex((index) => {
-        const next = Math.max(0, Math.min(shown.length - 1, index + (event.key === "ArrowDown" ? 1 : -1)));
-        const row = listRef.current?.querySelector(`[data-row="${next}"]`);
-        row?.scrollIntoView({ block: "nearest" });
-        return next;
-      });
+      const base = focusIndex < 0 ? (event.key === "ArrowDown" ? -1 : 0) : focusIndex;
+      const next = Math.max(0, Math.min(shown.length - 1, base + (event.key === "ArrowDown" ? 1 : -1)));
+      setFocusedId(shown[next]!.id);
+      listRef.current?.querySelector(`[data-row="${next}"]`)?.scrollIntoView({ block: "nearest" });
     } else if (event.key === "Enter") {
       event.preventDefault();
-      const asset = shown[Math.min(focusIndex, shown.length - 1)];
+      const asset = shown[focusIndex < 0 ? 0 : focusIndex];
       if (asset) onSelect(asset);
     } else if (event.key === " ") {
       event.preventDefault();
-      const asset = shown[Math.min(focusIndex, shown.length - 1)];
+      const asset = shown[focusIndex < 0 ? 0 : focusIndex];
       if (asset) onToggleSelect(asset.id);
     }
   };
@@ -713,7 +714,7 @@ function AssetList({ assets, compact, loading, hasAssets, onSelect, onContextMen
       {shown.map((asset, index) => {
         const isSelected = selectedId === asset.id;
         const isChecked = selectedIds.has(asset.id);
-        const isFocused = index === focusIndex;
+        const isFocused = asset.id === focusedId;
         const isFlashing = flashId === asset.id;
         const { primary, secondary } = describeUrl(asset.url);
         return (
@@ -723,7 +724,7 @@ function AssetList({ assets, compact, loading, hasAssets, onSelect, onContextMen
             data-row={index}
             role="option"
             aria-selected={isSelected}
-            onClick={() => { setFocusIndex(index); onSelect(asset); }}
+            onClick={() => { setFocusedId(asset.id); onSelect(asset); }}
             onContextMenu={(event) => onContextMenu(event, asset)}
             className={`group flex cursor-pointer items-center gap-2.5 px-4 py-2.5 transition-colors ${
               isSelected ? "bg-accent-soft" : isChecked ? "bg-accent-soft/40" : "hover:bg-slate-50"
@@ -858,11 +859,26 @@ function ContextItem({ icon, label, onClick, disabled }: { icon: React.ReactNode
 function PreviewDrawer({ asset, compact, onClose, onContextMenu }: { asset: AssetRecord; compact: boolean; onClose: () => void; onContextMenu: (event: React.MouseEvent, asset: AssetRecord) => void }) {
   const { downloadAsset } = useInspectorStore();
   const [copied, setCopied] = useState(false);
+  const panelRef = useRef<HTMLElement>(null);
 
+  // Modal a11y: move focus into the drawer, trap Tab within it, and restore focus
+  // to the previously-focused element on close.
   useEffect(() => {
-    const onKey = (event: KeyboardEvent) => event.key === "Escape" && onClose();
+    const previous = document.activeElement as HTMLElement | null;
+    panelRef.current?.focus();
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") { onClose(); return; }
+      if (event.key !== "Tab" || !panelRef.current) return;
+      const focusables = Array.from(panelRef.current.querySelectorAll<HTMLElement>('a[href],button:not([disabled]),input:not([disabled]),[tabindex]:not([tabindex="-1"])'));
+      if (!focusables.length) return;
+      const first = focusables[0]!;
+      const last = focusables[focusables.length - 1]!;
+      const active = document.activeElement;
+      if (event.shiftKey && (active === first || active === panelRef.current)) { event.preventDefault(); last.focus(); }
+      else if (!event.shiftKey && active === last) { event.preventDefault(); first.focus(); }
+    };
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    return () => { window.removeEventListener("keydown", onKey); previous?.focus?.(); };
   }, [onClose]);
 
   const copyUrl = () => {
@@ -876,7 +892,12 @@ function PreviewDrawer({ asset, compact, onClose, onContextMenu }: { asset: Asse
     <>
       <div className="fixed inset-0 z-40 animate-fade-in bg-slate-900/30" onClick={onClose} />
       <aside
-        className={`fixed right-0 top-0 z-50 flex h-full animate-drawer-in flex-col bg-surface shadow-drawer ${compact ? "w-full" : "w-full max-w-[440px]"}`}
+        ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label={`Asset preview: ${describeUrl(asset.url).primary}`}
+        tabIndex={-1}
+        className={`fixed right-0 top-0 z-50 flex h-full animate-drawer-in flex-col bg-surface shadow-drawer outline-none ${compact ? "w-full" : "w-full max-w-[440px]"}`}
         onContextMenu={(event) => onContextMenu(event, asset)}
       >
         <div className="flex items-center justify-between gap-2 border-b border-slate-200 px-4 py-3">

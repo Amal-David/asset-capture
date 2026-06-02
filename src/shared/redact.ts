@@ -5,10 +5,14 @@ const SENSITIVE_QUERY_KEYS = [/token/i, /key/i, /sig/i, /signature/i, /credentia
 const SECRET_PATTERNS: Array<{ flag: string; re: RegExp }> = [
   { flag: "inline:jwt", re: /\beyJ[a-zA-Z0-9_-]{8,}\.[a-zA-Z0-9_-]{8,}\.[a-zA-Z0-9_-]+/g },
   { flag: "inline:provider-key", re: /\b(?:sk|pk|rk)_(?:live|test)_[a-zA-Z0-9]{8,}/g },
+  { flag: "inline:openai-key", re: /\bsk-(?:proj-)?[A-Za-z0-9_-]{20,}/g },
   { flag: "inline:github-token", re: /\bgh[pousr]_[A-Za-z0-9]{20,}/g },
+  { flag: "inline:github-pat", re: /\bgithub_pat_[0-9A-Za-z_]{22,}/g },
   { flag: "inline:slack-token", re: /\bxox[baprs]-[A-Za-z0-9-]{10,}/g },
   { flag: "inline:google-key", re: /\bAIza[0-9A-Za-z_-]{20,}/g },
-  { flag: "inline:aws-key", re: /\b(?:AKIA|ASIA)[0-9A-Z]{12,}/g }
+  { flag: "inline:google-oauth", re: /\bya29\.[0-9A-Za-z_-]+/g },
+  { flag: "inline:aws-key", re: /\b(?:AKIA|ASIA)[0-9A-Z]{12,}/g },
+  { flag: "inline:private-key", re: /-----BEGIN (?:RSA |EC |OPENSSH |PGP |DSA )?PRIVATE KEY-----[\s\S]*?-----END (?:RSA |EC |OPENSSH |PGP |DSA )?PRIVATE KEY-----/g }
 ];
 
 export interface RedactionResult<T> {
