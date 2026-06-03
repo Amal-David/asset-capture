@@ -69,6 +69,9 @@ Goal: most comprehensive + intelligent asset-capture extension. Adversarial agen
   Targeted adversarial review of the new code: CLEAN (verified vs fflate internals).
 - PR #1 description refreshed to full scope.
 - STATE: converged-clean, 41 tests, build green, ~22 commits. Branch work/audit-ui-hardening.
-- Standing deferred (need NEW dep / user approval, NOT done autonomously per supply-chain cooldown):
-  hls.js playable stream preview; true list virtualizer (@tanstack/react-virtual) for 5k+ assets.
-  Also intentionally out of scope: SSE/EventSource capture (data stream, not downloadable assets).
+- Iteration 7 (user approved both deferred items): hls.js@1.6.16 HLS playable preview (pinned,
+  --ignore-scripts, cooldown-clear, IOC-scanned, code-split) [69e560e]; dep-free fixed-row
+  virtualizer (avoided @tanstack worm namespace) [69e560e]. Adversarial review found HLS re-render
+  churn + native leak + dead prop -> fixed [3a811bb]. Virtualizer verified with 300-asset harness.
+- All articulated goals met. No outstanding deferred items.
+- Intentionally out of scope: SSE/EventSource capture (data stream, not downloadable assets).
