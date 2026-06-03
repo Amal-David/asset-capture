@@ -285,7 +285,6 @@ export function App({ compact = false, tabId }: AppProps) {
       <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto">
         <AssetList
           assets={sorted}
-          compact={compact}
           loading={loading}
           hasAssets={assets.length > 0}
           onSelect={setSelectedAsset}
@@ -628,28 +627,35 @@ function ManifestCard({ record, tabId }: { record: MediaRecord; tabId?: number }
 // fetch cross-origin segments without CORS failures.
 function HlsPlayer({ src, onError }: { src: string; onError: () => void }) {
   const videoRef = useRef<HTMLVideoElement>(null);
+  // Keep onError in a ref so the effect depends only on `src`. The parent
+  // re-renders every 1.5s (snapshot poll); without this the inline onError closure
+  // would change identity each tick and tear down + rebuild the Hls instance,
+  // stuttering/resetting playback ~once a second.
+  const onErrorRef = useRef(onError);
+  onErrorRef.current = onError;
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
     let cancelled = false;
     let instance: { destroy: () => void } | null = null;
+    const fail = () => onErrorRef.current();
     if (video.canPlayType("application/vnd.apple.mpegurl")) {
       video.src = src; // native HLS (Safari)
-      return;
+      return () => { video.removeAttribute("src"); video.load(); };
     }
     void import("hls.js")
       .then(({ default: Hls }) => {
         if (cancelled || !video) return;
-        if (!Hls.isSupported()) { onError(); return; }
+        if (!Hls.isSupported()) { fail(); return; }
         const hls = new Hls({ enableWorker: true });
         instance = hls;
-        hls.on(Hls.Events.ERROR, (_event, data) => { if (data.fatal) onError(); });
+        hls.on(Hls.Events.ERROR, (_event, data) => { if (data.fatal) fail(); });
         hls.loadSource(src);
         hls.attachMedia(video);
       })
-      .catch(() => onError());
+      .catch(() => fail());
     return () => { cancelled = true; instance?.destroy(); };
-  }, [src, onError]);
+  }, [src]);
   return <video ref={videoRef} controls className="max-h-[260px] w-full rounded bg-black" />;
 }
 
@@ -680,7 +686,7 @@ function BulkButton({ icon, label, onClick }: { icon: React.ReactNode; label: st
   );
 }
 
-function AssetList({ assets, loading, hasAssets, onSelect, onContextMenu, selectedId, flashId, selectedIds, onToggleSelect, scrollParentRef }: { assets: AssetRecord[]; compact: boolean; loading: boolean; hasAssets: boolean; onSelect: (asset: AssetRecord) => void; onContextMenu: (event: React.MouseEvent, asset: AssetRecord) => void; selectedId?: string; flashId?: string | null; selectedIds: Set<string>; onToggleSelect: (id: string) => void; scrollParentRef: React.RefObject<HTMLDivElement | null> }) {
+function AssetList({ assets, loading, hasAssets, onSelect, onContextMenu, selectedId, flashId, selectedIds, onToggleSelect, scrollParentRef }: { assets: AssetRecord[]; loading: boolean; hasAssets: boolean; onSelect: (asset: AssetRecord) => void; onContextMenu: (event: React.MouseEvent, asset: AssetRecord) => void; selectedId?: string; flashId?: string | null; selectedIds: Set<string>; onToggleSelect: (id: string) => void; scrollParentRef: React.RefObject<HTMLDivElement | null> }) {
   // Track keyboard focus by asset id (not index) so the ring follows the asset
   // across sort/filter reorders and never silently retargets after a shrink.
   const [focusedId, setFocusedId] = useState<string | null>(null);
