@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AlertTriangle, ArrowDown, ArrowUp, Box, Check, ChevronDown, Clipboard, Copy, Crosshair, Database, Download, ExternalLink, Eye, FileArchive, FileJson, FileSpreadsheet, FileText, Film, Inbox, List, Loader2, Lock, Network, RefreshCw, ScanSearch, Search, Shield, Trash2, X, Zap } from "lucide-react";
+import { AlertTriangle, ArrowDown, ArrowUp, Box, Check, ChevronDown, Clipboard, Copy, Crosshair, Database, Download, ExternalLink, Eye, FileArchive, FileJson, FileSpreadsheet, FileText, Film, Inbox, List, Loader2, Lock, Network, Play, RefreshCw, ScanSearch, Search, Shield, Trash2, X, Zap } from "lucide-react";
 import { useInspectorStore } from "./store";
 import type { SortDir, SortKey, StatusFilter } from "./store";
 import type { AssetKind, AssetRecord, ExportJob, MediaRecord } from "../shared/types";
@@ -53,6 +53,7 @@ export function App({ compact = false, tabId }: AppProps) {
   const [activeTabId, setActiveTabId] = useState<number | undefined>(tabId);
   const [selectedAsset, setSelectedAsset] = useState<AssetRecord | null>(null);
   const [menu, setMenu] = useState<{ x: number; y: number; asset: AssetRecord } | null>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
   const openMenu = useCallback((event: React.MouseEvent, asset: AssetRecord) => {
     event.preventDefault();
     setSelectedAsset(asset);
@@ -281,7 +282,7 @@ export function App({ compact = false, tabId }: AppProps) {
         />
       )}
 
-      <div className="min-h-0 flex-1 overflow-y-auto">
+      <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto">
         <AssetList
           assets={sorted}
           compact={compact}
@@ -293,6 +294,7 @@ export function App({ compact = false, tabId }: AppProps) {
           flashId={flashAssetId}
           selectedIds={selectedIds}
           onToggleSelect={toggleSelect}
+          scrollParentRef={scrollRef}
         />
       </div>
 
@@ -548,7 +550,10 @@ function ManifestCard({ record, tabId }: { record: MediaRecord; tabId?: number }
   const { fetchText } = useInspectorStore();
   const [parsed, setParsed] = useState<ParsedManifest | null>(null);
   const [state, setState] = useState<"loading" | "ready" | "error">("loading");
+  const [play, setPlay] = useState(false);
+  const [playError, setPlayError] = useState(false);
   const kind = record.mediaKind === "dash" ? "dash" : "hls";
+  const canPlay = record.mediaKind === "hls" && state === "ready" && parsed != null && !parsed.drmDetected;
 
   useEffect(() => {
     if (record.mediaKind !== "hls" && record.mediaKind !== "dash") { setState("error"); return; }
@@ -578,7 +583,14 @@ function ManifestCard({ record, tabId }: { record: MediaRecord; tabId?: number }
         {parsed?.drmDetected && (
           <span className="flex shrink-0 items-center gap-1 rounded bg-amber-50 px-1.5 py-0.5 text-[10px] font-medium text-amber-700"><Lock size={10} /> DRM</span>
         )}
+        {canPlay && !play && (
+          <button className="flex shrink-0 items-center gap-1 rounded bg-accent px-1.5 py-0.5 text-[10px] font-medium text-white hover:bg-teal-700" onClick={() => { setPlayError(false); setPlay(true); }}>
+            <Play size={10} /> Play
+          </button>
+        )}
       </div>
+      {play && !playError && <div className="mt-2"><HlsPlayer src={record.manifestUrl} onError={() => setPlayError(true)} /></div>}
+      {play && playError && <div className="mt-1 text-xs text-slate-400">Stream couldn't be played here (codec/CORS/DRM). Open the manifest to inspect.</div>}
       {state === "loading" && <div className="mt-1 text-xs text-slate-400">Parsing manifest…</div>}
       {state === "error" && <div className="mt-1 text-xs text-slate-400">Couldn't read manifest (cross-origin or offline).</div>}
       {state === "ready" && parsed && (
@@ -611,8 +623,38 @@ function ManifestCard({ record, tabId }: { record: MediaRecord; tabId?: number }
   );
 }
 
-const POPUP_CAP = 50;
-const WINDOW_STEP = 200;
+// Lazy-loads hls.js only when a non-DRM HLS stream is actually played, so the dep
+// stays out of the main bundle. The sidepanel has host permissions, so hls.js can
+// fetch cross-origin segments without CORS failures.
+function HlsPlayer({ src, onError }: { src: string; onError: () => void }) {
+  const videoRef = useRef<HTMLVideoElement>(null);
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    let cancelled = false;
+    let instance: { destroy: () => void } | null = null;
+    if (video.canPlayType("application/vnd.apple.mpegurl")) {
+      video.src = src; // native HLS (Safari)
+      return;
+    }
+    void import("hls.js")
+      .then(({ default: Hls }) => {
+        if (cancelled || !video) return;
+        if (!Hls.isSupported()) { onError(); return; }
+        const hls = new Hls({ enableWorker: true });
+        instance = hls;
+        hls.on(Hls.Events.ERROR, (_event, data) => { if (data.fatal) onError(); });
+        hls.loadSource(src);
+        hls.attachMedia(video);
+      })
+      .catch(() => onError());
+    return () => { cancelled = true; instance?.destroy(); };
+  }, [src, onError]);
+  return <video ref={videoRef} controls className="max-h-[260px] w-full rounded bg-black" />;
+}
+
+// Fixed row height enables exact virtualization offsets with no measurement pass.
+const ASSET_ROW_HEIGHT = 56;
 
 function BulkBar({ count, onSelectAll, onClear, onCopyUrls, onDownload, onExportZip }: { count: number; onSelectAll: () => void; onClear: () => void; onCopyUrls: () => void; onDownload: () => void; onExportZip: () => void }) {
   return (
@@ -638,53 +680,64 @@ function BulkButton({ icon, label, onClick }: { icon: React.ReactNode; label: st
   );
 }
 
-function AssetList({ assets, compact, loading, hasAssets, onSelect, onContextMenu, selectedId, flashId, selectedIds, onToggleSelect }: { assets: AssetRecord[]; compact: boolean; loading: boolean; hasAssets: boolean; onSelect: (asset: AssetRecord) => void; onContextMenu: (event: React.MouseEvent, asset: AssetRecord) => void; selectedId?: string; flashId?: string | null; selectedIds: Set<string>; onToggleSelect: (id: string) => void }) {
-  const [visible, setVisible] = useState(WINDOW_STEP);
+function AssetList({ assets, loading, hasAssets, onSelect, onContextMenu, selectedId, flashId, selectedIds, onToggleSelect, scrollParentRef }: { assets: AssetRecord[]; compact: boolean; loading: boolean; hasAssets: boolean; onSelect: (asset: AssetRecord) => void; onContextMenu: (event: React.MouseEvent, asset: AssetRecord) => void; selectedId?: string; flashId?: string | null; selectedIds: Set<string>; onToggleSelect: (id: string) => void; scrollParentRef: React.RefObject<HTMLDivElement | null> }) {
   // Track keyboard focus by asset id (not index) so the ring follows the asset
   // across sort/filter reorders and never silently retargets after a shrink.
   const [focusedId, setFocusedId] = useState<string | null>(null);
-  const sentinelRef = useRef<HTMLLIElement>(null);
-  const listRef = useRef<HTMLUListElement>(null);
+  const [view, setView] = useState({ top: 0, height: 800 });
+  const focusIndex = assets.findIndex((asset) => asset.id === focusedId);
 
-  const shown = compact ? assets.slice(0, POPUP_CAP) : assets.slice(0, visible);
-  const hasMore = !compact && assets.length > visible;
-  const truncatedPopup = compact && assets.length > POPUP_CAP;
-  const focusIndex = shown.findIndex((asset) => asset.id === focusedId);
-
-  // Grow the window as the sentinel scrolls into view — keeps thousands of
-  // assets responsive without rendering them all or pulling in a virtualizer dep.
+  // True virtualization: render only the rows in (and just outside) the viewport,
+  // backed by fixed-height spacers. Fixed ROW_HEIGHT keeps offsets exact without a
+  // measurement pass — hand-rolled to avoid the recently-compromised @tanstack dep.
   useEffect(() => {
-    const node = sentinelRef.current;
-    if (!node) return;
-    const io = new IntersectionObserver((entries) => {
-      if (entries.some((entry) => entry.isIntersecting)) setVisible((value) => value + WINDOW_STEP);
-    }, { rootMargin: "400px" });
-    io.observe(node);
-    return () => io.disconnect();
-    // `visible` is a dep so the observer re-attaches after each growth step — an IO
-    // only fires on transitions, so without this a sentinel that stays inside the
-    // rootMargin would never trigger a second load.
-  }, [hasMore, assets.length, visible]);
+    const el = scrollParentRef.current;
+    if (!el) return;
+    const onScroll = () => setView({ top: el.scrollTop, height: el.clientHeight });
+    onScroll();
+    el.addEventListener("scroll", onScroll, { passive: true });
+    const resize = new ResizeObserver(onScroll);
+    resize.observe(el);
+    return () => { el.removeEventListener("scroll", onScroll); resize.disconnect(); };
+  }, [scrollParentRef]);
 
-  const flashRef = useCallback((node: HTMLLIElement | null) => {
-    if (node) node.scrollIntoView({ behavior: "smooth", block: "center" });
-  }, []);
+  const total = assets.length;
+  const overscan = 8;
+  const start = Math.max(0, Math.floor(view.top / ASSET_ROW_HEIGHT) - overscan);
+  const end = Math.min(total, Math.ceil((view.top + view.height) / ASSET_ROW_HEIGHT) + overscan);
+  const windowRows = assets.slice(start, end);
+
+  const scrollToIndex = (index: number) => {
+    const el = scrollParentRef.current;
+    if (!el) return;
+    const rowTop = index * ASSET_ROW_HEIGHT;
+    if (rowTop < el.scrollTop) el.scrollTop = rowTop;
+    else if (rowTop + ASSET_ROW_HEIGHT > el.scrollTop + el.clientHeight) el.scrollTop = rowTop - el.clientHeight + ASSET_ROW_HEIGHT;
+  };
+
+  // Bring a freshly picked asset (e.g. element picker) into view.
+  useEffect(() => {
+    if (!flashId) return;
+    const index = assets.findIndex((asset) => asset.id === flashId);
+    if (index >= 0) scrollToIndex(index);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [flashId]);
 
   const onKeyDown = (event: React.KeyboardEvent) => {
-    if (!shown.length) return;
+    if (!total) return;
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
       event.preventDefault();
       const base = focusIndex < 0 ? (event.key === "ArrowDown" ? -1 : 0) : focusIndex;
-      const next = Math.max(0, Math.min(shown.length - 1, base + (event.key === "ArrowDown" ? 1 : -1)));
-      setFocusedId(shown[next]!.id);
-      listRef.current?.querySelector(`[data-row="${next}"]`)?.scrollIntoView({ block: "nearest" });
+      const next = Math.max(0, Math.min(total - 1, base + (event.key === "ArrowDown" ? 1 : -1)));
+      setFocusedId(assets[next]!.id);
+      scrollToIndex(next);
     } else if (event.key === "Enter") {
       event.preventDefault();
-      const asset = shown[focusIndex < 0 ? 0 : focusIndex];
+      const asset = assets[focusIndex < 0 ? 0 : focusIndex];
       if (asset) onSelect(asset);
     } else if (event.key === " ") {
       event.preventDefault();
-      const asset = shown[focusIndex < 0 ? 0 : focusIndex];
+      const asset = assets[focusIndex < 0 ? 0 : focusIndex];
       if (asset) onToggleSelect(asset.id);
     }
   };
@@ -705,14 +758,15 @@ function AssetList({ assets, compact, loading, hasAssets, onSelect, onContextMen
 
   return (
     <ul
-      ref={listRef}
       role="listbox"
       aria-label="Captured assets"
       tabIndex={0}
       onKeyDown={onKeyDown}
-      className="divide-y divide-slate-100 outline-none"
+      className="relative outline-none"
+      style={{ height: total * ASSET_ROW_HEIGHT }}
     >
-      {shown.map((asset, index) => {
+      {windowRows.map((asset, i) => {
+        const index = start + i;
         const isSelected = selectedId === asset.id;
         const isChecked = selectedIds.has(asset.id);
         const isFocused = asset.id === focusedId;
@@ -721,13 +775,13 @@ function AssetList({ assets, compact, loading, hasAssets, onSelect, onContextMen
         return (
           <li
             key={asset.id}
-            ref={isFlashing ? flashRef : undefined}
             data-row={index}
             role="option"
             aria-selected={isSelected}
             onClick={() => { setFocusedId(asset.id); onSelect(asset); }}
             onContextMenu={(event) => onContextMenu(event, asset)}
-            className={`group flex cursor-pointer items-center gap-2.5 px-4 py-2.5 transition-colors ${
+            style={{ position: "absolute", top: index * ASSET_ROW_HEIGHT, left: 0, right: 0, height: ASSET_ROW_HEIGHT }}
+            className={`group flex cursor-pointer items-center gap-2.5 border-b border-slate-100 px-4 transition-colors ${
               isSelected ? "bg-accent-soft" : isChecked ? "bg-accent-soft/40" : "hover:bg-slate-50"
             } ${isFocused ? "ring-1 ring-inset ring-accent/40" : ""} ${isFlashing ? "picker-flash" : ""}`}
           >
@@ -756,8 +810,6 @@ function AssetList({ assets, compact, loading, hasAssets, onSelect, onContextMen
           </li>
         );
       })}
-      {hasMore && <li ref={sentinelRef} className="px-4 py-3 text-center text-xs text-slate-400">Loading more… ({visible} of {assets.length})</li>}
-      {truncatedPopup && <li className="px-4 py-3 text-center text-xs text-slate-400">Showing {POPUP_CAP} of {assets.length} — open the full side panel to see all.</li>}
     </ul>
   );
 }
