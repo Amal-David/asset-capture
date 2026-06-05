@@ -4,3 +4,4 @@ dist/
 .env
 .env.*
 coverage/
+submission/chrome-web-store/*.zip

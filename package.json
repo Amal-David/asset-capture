@@ -8,7 +8,8 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "package:chrome": "npm run build && mkdir -p submission/chrome-web-store && rm -f submission/chrome-web-store/universal-asset-inspector-$npm_package_version.zip && cd dist && zip -qr ../submission/chrome-web-store/universal-asset-inspector-$npm_package_version.zip ."
   },
   "dependencies": {
     "@google/model-viewer": "4.2.0",

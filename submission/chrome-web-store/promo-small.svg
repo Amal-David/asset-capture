@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="440" height="280" viewBox="0 0 440 280" role="img" aria-labelledby="title desc">
+  <title id="title">Universal Asset Inspector promotional tile</title>
+  <desc id="desc">Brand artwork for a Chrome Web Store small promotional image.</desc>
+  <rect width="440" height="280" fill="#0f766e"/>
+  <path d="M0 220c54-28 104-34 151-18 50 17 95 47 149 34 49-11 88-45 140-35v79H0z" fill="#ffffff" opacity="0.08"/>
+  <g>
+    <rect x="74" y="48" width="292" height="184" rx="24" fill="#f8fafc"/>
+    <rect x="94" y="72" width="252" height="34" rx="8" fill="#17212b" opacity="0.08"/>
+    <rect x="112" y="125" width="96" height="24" rx="7" fill="#0f766e" opacity="0.95"/>
+    <rect x="224" y="125" width="70" height="24" rx="7" fill="#17212b" opacity="0.14"/>
+    <rect x="112" y="163" width="164" height="16" rx="6" fill="#17212b" opacity="0.18"/>
+    <rect x="112" y="190" width="122" height="16" rx="6" fill="#17212b" opacity="0.12"/>
+    <circle cx="307" cy="171" r="40" fill="#d9fbf5" stroke="#17212b" stroke-width="8"/>
+    <path d="M338 202l32 32" fill="none" stroke="#17212b" stroke-width="14" stroke-linecap="round"/>
+    <path d="M339 202l29 29" fill="none" stroke="#ffffff" stroke-width="5" stroke-linecap="round" opacity="0.75"/>
+  </g>
+  <circle cx="104" cy="86" r="6" fill="#0f766e"/>
+  <circle cx="126" cy="86" r="6" fill="#be123c"/>
+  <circle cx="148" cy="86" r="6" fill="#17212b" opacity="0.26"/>
+</svg>
