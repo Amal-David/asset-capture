@@ -151,6 +151,13 @@ export const useInspectorStore = create<InspectorState>((set, get) => ({
     }
   },
   toggleDeepCapture: async (tabId, enabled) => {
+    if (enabled) {
+      const granted = await requestDebuggerPermission();
+      if (!granted) {
+        set({ error: "Deep capture needs the Chrome debugger permission." });
+        return;
+      }
+    }
     const response = await sendMessage({ type: "TOGGLE_DEEP_CAPTURE", tabId, enabled });
     if (!response.ok) {
       set({ error: response.error });
@@ -194,3 +201,12 @@ export const useInspectorStore = create<InspectorState>((set, get) => ({
   },
   clearPickerResult: () => set({ pickerResult: undefined })
 }));
+
+async function requestDebuggerPermission(): Promise<boolean> {
+  if (!chrome.permissions?.request) return false;
+  try {
+    return await chrome.permissions.request({ permissions: ["debugger"] });
+  } catch {
+    return false;
+  }
+}

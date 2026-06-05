@@ -7,9 +7,13 @@ import { base64ToBytes, getExtension, inferFrameOrigin, stableId } from "../shar
 import { isTextLikeMime, redactHeaders, redactTextContent } from "../shared/redact";
 
 const requestStarts = new Map<string, number>();
+const inspectedTabs = new Map<number, number>();
 const deepCaptureTabs = new Set<number>();
 const pickerActiveTabs = new Set<number>();
 const pendingPickerResults = new Map<number, PickerResult>();
+const ACTIVE_INSPECTION_TTL_MS = 10_000;
+const MAX_STORED_BODY_BYTES = 16 * 1024 * 1024;
+const MAX_STORED_BODY_BASE64_CHARS = Math.ceil(MAX_STORED_BODY_BYTES * 4 / 3) + 4;
 
 chrome.runtime.onInstalled.addListener(() => {
   void chrome.sidePanel?.setPanelBehavior?.({ openPanelOnActionClick: true });
@@ -39,6 +43,7 @@ async function pruneOrphanSessions(): Promise<void> {
 
 chrome.webRequest.onBeforeRequest.addListener(
   (details) => {
+    if (!shouldCaptureRequest(details)) return undefined;
     requestStarts.set(details.requestId, details.timeStamp);
     void recordRequest(details, "beforeRequest");
     void upsertAssetFromRequest(details, "webRequest");
@@ -48,13 +53,17 @@ chrome.webRequest.onBeforeRequest.addListener(
 );
 
 chrome.webRequest.onSendHeaders.addListener(
-  (details) => void recordRequest(details, "sendHeaders"),
+  (details) => {
+    if (!shouldCaptureRequest(details)) return;
+    void recordRequest(details, "sendHeaders");
+  },
   { urls: ["<all_urls>"] },
   ["requestHeaders", "extraHeaders"]
 );
 
 chrome.webRequest.onHeadersReceived.addListener(
   (details) => {
+    if (!shouldCaptureRequest(details)) return undefined;
     void recordRequest(details, "headersReceived");
     void upsertAssetFromRequest(details, "webRequest");
     return undefined;
@@ -65,6 +74,7 @@ chrome.webRequest.onHeadersReceived.addListener(
 
 chrome.webRequest.onCompleted.addListener(
   (details) => {
+    if (!shouldCaptureRequest(details)) return;
     void recordRequest(details, "completed");
     void upsertAssetFromRequest(details, "webRequest");
     requestStarts.delete(details.requestId);
@@ -75,6 +85,7 @@ chrome.webRequest.onCompleted.addListener(
 
 chrome.webRequest.onErrorOccurred.addListener(
   (details) => {
+    if (!shouldCaptureRequest(details)) return;
     void recordRequest(details, "error");
     requestStarts.delete(details.requestId);
   },
@@ -84,6 +95,7 @@ chrome.webRequest.onErrorOccurred.addListener(
 // A closed tab's capture is dead weight (and assetBodies can be many MB each),
 // so reclaim its IndexedDB rows and in-memory state when the tab goes away.
 chrome.tabs.onRemoved.addListener((tabId) => {
+  inspectedTabs.delete(tabId);
   deepCaptureTabs.delete(tabId);
   pickerActiveTabs.delete(tabId);
   pendingPickerResults.delete(tabId);
@@ -104,11 +116,23 @@ chrome.runtime.onMessage.addListener((message: RuntimeMessage, sender, sendRespo
 // Tab-scoped key avoids cross-tab collisions; capped + purged-on-detach to bound it.
 const debuggerResponses = new Map<string, { url: string; mime?: string }>();
 const MAX_DEBUGGER_PENDING = 1000;
+let debuggerListenersRegistered = false;
 
-chrome.debugger.onEvent.addListener((source, method, params) => {
+ensureDebuggerListeners();
+
+function ensureDebuggerListeners(): boolean {
+  if (!chrome.debugger?.onEvent || !chrome.debugger?.onDetach) return false;
+  if (debuggerListenersRegistered) return true;
+  chrome.debugger.onEvent.addListener(handleDebuggerEvent);
+  chrome.debugger.onDetach.addListener(handleDebuggerDetach);
+  debuggerListenersRegistered = true;
+  return true;
+}
+
+function handleDebuggerEvent(source: chrome.debugger.Debuggee, method: string, params?: object): void {
   if (!source.tabId || !method.startsWith("Network.")) return;
   const tabId = source.tabId;
-  const event = params as Record<string, unknown>;
+  const event = (params ?? {}) as Record<string, unknown>;
   const requestId = typeof event.requestId === "string" ? event.requestId : undefined;
   const key = requestId ? `${tabId}:${requestId}` : undefined;
   const response = event.response as Record<string, unknown> | undefined;
@@ -145,7 +169,7 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
   } else if (method === "Network.loadingFailed" && key) {
     debuggerResponses.delete(key);
   }
-});
+}
 
 async function captureDebuggerBody(tabId: number, requestId: string, key: string): Promise<void> {
   const meta = debuggerResponses.get(key);
@@ -161,19 +185,21 @@ async function captureDebuggerBody(tabId: number, requestId: string, key: string
   }
 }
 
-chrome.debugger.onDetach.addListener((source) => {
+function handleDebuggerDetach(source: chrome.debugger.Debuggee): void {
   if (!source.tabId) return;
   deepCaptureTabs.delete(source.tabId);
   const prefix = `${source.tabId}:`;
   for (const key of debuggerResponses.keys()) {
     if (key.startsWith(prefix)) debuggerResponses.delete(key);
   }
-});
+}
 
 async function handleMessage(message: RuntimeMessage, sender: chrome.runtime.MessageSender): Promise<RuntimeResponse> {
   const requestedTabId = "tabId" in message ? message.tabId : undefined;
   const tabId = requestedTabId ?? sender.tab?.id ?? (await getActiveTabId());
   if (message.type === "GET_SNAPSHOT") {
+    const newlyInspected = markInspected(tabId);
+    if (newlyInspected && tabId) void requestTabRescan(tabId);
     const snapshot = await getSnapshot(tabId);
     const pickerResult = tabId ? pendingPickerResults.get(tabId) : undefined;
     if (pickerResult && tabId) pendingPickerResults.delete(tabId);
@@ -195,6 +221,7 @@ async function handleMessage(message: RuntimeMessage, sender: chrome.runtime.Mes
 
   if (message.type === "RESCAN") {
     if (!tabId) return { ok: false, error: "No active tab to rescan." };
+    markInspected(tabId);
     try {
       await chrome.tabs.sendMessage(tabId, { type: "PAGE_RESCAN" });
     } catch {
@@ -204,12 +231,14 @@ async function handleMessage(message: RuntimeMessage, sender: chrome.runtime.Mes
   }
 
   if (message.type === "DOM_ASSET_BATCH") {
+    if (!canCaptureTab(tabId)) return { ok: true };
     await Promise.all(message.assets.map((asset) => upsertAssetFromPartial(asset, tabId, sender.frameId, message.pageUrl)));
     await Promise.all((message.media ?? []).map((media) => upsertMedia(media, tabId, sender.frameId)));
     return { ok: true };
   }
 
   if (message.type === "PAGE_HOOK_EVENT") {
+    if (!canCaptureTab(tabId)) return { ok: true };
     await recordPageHookEvent(message, tabId, sender.frameId, message.pageUrl);
     return { ok: true };
   }
@@ -237,11 +266,13 @@ async function handleMessage(message: RuntimeMessage, sender: chrome.runtime.Mes
   }
 
   if (message.type === "TOGGLE_DEEP_CAPTURE") {
+    markInspected(message.tabId);
     const attached = await setDeepCapture(message.tabId, message.enabled);
     return { ok: true, deepCaptureAttached: attached };
   }
 
   if (message.type === "ASSET_BODY") {
+    if (!canCaptureTab(tabId)) return { ok: true };
     await storeAssetBody(message, tabId);
     return { ok: true };
   }
@@ -293,6 +324,7 @@ async function handleMessage(message: RuntimeMessage, sender: chrome.runtime.Mes
   }
 
   if (message.type === "PICKER_ACTIVATE") {
+    markInspected(message.tabId);
     try {
       await chrome.tabs.sendMessage(message.tabId, { type: "PICKER_ACTIVATE" });
     } catch {
@@ -317,6 +349,7 @@ async function handleMessage(message: RuntimeMessage, sender: chrome.runtime.Mes
 
   if (message.type === "PICKER_RESULT") {
     const senderTabId = sender.tab?.id;
+    if (!canCaptureTab(senderTabId)) return { ok: true };
     if (senderTabId) {
       pickerActiveTabs.delete(senderTabId);
       pendingPickerResults.set(senderTabId, {
@@ -336,6 +369,36 @@ async function handleMessage(message: RuntimeMessage, sender: chrome.runtime.Mes
   }
 
   return { ok: false, error: "Unsupported message" };
+}
+
+function markInspected(tabId?: number): boolean {
+  if (!tabId) return false;
+  const wasInspected = canCaptureTab(tabId);
+  inspectedTabs.set(tabId, Date.now());
+  return !wasInspected;
+}
+
+function canCaptureTab(tabId?: number): tabId is number {
+  if (typeof tabId !== "number") return false;
+  const lastSeen = inspectedTabs.get(tabId);
+  if (!lastSeen) return false;
+  if (Date.now() - lastSeen > ACTIVE_INSPECTION_TTL_MS) {
+    inspectedTabs.delete(tabId);
+    return false;
+  }
+  return true;
+}
+
+function shouldCaptureRequest(details: Pick<AnyWebRequestDetails, "tabId">): boolean {
+  return details.tabId >= 0 && canCaptureTab(details.tabId);
+}
+
+async function requestTabRescan(tabId: number): Promise<void> {
+  try {
+    await chrome.tabs.sendMessage(tabId, { type: "PAGE_RESCAN" });
+  } catch {
+    // Some pages cannot receive content scripts; the snapshot can still return.
+  }
 }
 
 async function recordPageHookEvent(message: Extract<RuntimeMessage, { type: "PAGE_HOOK_EVENT" }>, tabId?: number, frameId?: number, pageUrl?: string): Promise<void> {
@@ -414,11 +477,18 @@ async function storeAssetBody(
   message: Extract<RuntimeMessage, { type: "ASSET_BODY" }>,
   tabId?: number
 ): Promise<void> {
+  if (message.base64.length > MAX_STORED_BODY_BASE64_CHARS) return;
+  let bytes: Uint8Array;
+  try {
+    bytes = base64ToBytes(message.base64);
+  } catch {
+    return;
+  }
   await persistAssetBody({
     sessionId: sessionIdForTab(tabId),
     tabId,
     key: message.key,
-    bytes: base64ToBytes(message.base64),
+    bytes,
     declaredMime: message.mime,
     pageUrl: message.pageUrl,
     source: message.key.startsWith("blob:") ? "blob" : "fetch"
@@ -443,13 +513,12 @@ async function readTextCapped(response: Response, limit: number): Promise<{ text
       text += decoder.decode(value, { stream: true });
       if (text.length > limit) { text = text.slice(0, limit); truncated = true; void reader.cancel(); break; }
     }
+    if (!truncated) text += decoder.decode();
   } catch {
     // Return whatever was read.
   }
   return { text, truncated };
 }
-
-const MAX_STORED_BODY_BYTES = 16 * 1024 * 1024;
 
 async function persistAssetBody(input: {
   sessionId: string;
@@ -672,16 +741,65 @@ async function setDeepCapture(tabId: number, enabled: boolean): Promise<boolean>
   const debuggee = { tabId };
   if (!enabled) {
     if (deepCaptureTabs.has(tabId)) await chrome.debugger.detach(debuggee);
+    await setClosedShadowCapture(tabId, false);
     deepCaptureTabs.delete(tabId);
     return false;
   }
 
   if (!deepCaptureTabs.has(tabId)) {
+    if (!ensureDebuggerListeners()) throw new Error("Chrome debugger API is unavailable.");
     await chrome.debugger.attach(debuggee, "1.3");
     await chrome.debugger.sendCommand(debuggee, "Network.enable");
+    await setClosedShadowCapture(tabId, true);
     deepCaptureTabs.add(tabId);
   }
   return true;
+}
+
+async function setClosedShadowCapture(tabId: number, enabled: boolean): Promise<void> {
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId, allFrames: true },
+      world: "MAIN",
+      func: enabled ? enableClosedShadowCapture : disableClosedShadowCapture
+    });
+  } catch {
+    // Optional hardening path: debugger capture still works when a frame refuses injection.
+  }
+}
+
+function enableClosedShadowCapture(): void {
+  const key = "__assetInspectorClosedShadowCapture";
+  const target = window as typeof window & {
+    [key]?: {
+      original: typeof Element.prototype.attachShadow;
+      patched: typeof Element.prototype.attachShadow;
+      enabled: boolean;
+    };
+  };
+  const existing = target[key];
+  if (existing?.enabled) return;
+  const original = existing?.original ?? Element.prototype.attachShadow;
+  const patched = function patchedAttachShadow(this: Element, init: ShadowRootInit): ShadowRoot {
+    return original.call(this, { ...init, mode: "open" });
+  } as typeof Element.prototype.attachShadow;
+  target[key] = { original, patched, enabled: true };
+  Element.prototype.attachShadow = patched;
+}
+
+function disableClosedShadowCapture(): void {
+  const key = "__assetInspectorClosedShadowCapture";
+  const target = window as typeof window & {
+    [key]?: {
+      original: typeof Element.prototype.attachShadow;
+      patched: typeof Element.prototype.attachShadow;
+      enabled: boolean;
+    };
+  };
+  const state = target[key];
+  if (!state?.enabled) return;
+  if (Element.prototype.attachShadow === state.patched) Element.prototype.attachShadow = state.original;
+  state.enabled = false;
 }
 
 async function getActiveTabId(): Promise<number | undefined> {

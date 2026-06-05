@@ -44,6 +44,13 @@ const EXPORTS: Array<{ type: ExportJob["type"]; label: string; icon: React.React
   { type: "zip", label: "ZIP (with bytes)", icon: <FileArchive size={15} /> }
 ];
 
+let modelViewerImport: Promise<unknown> | null = null;
+
+function ensureModelViewer(): Promise<unknown> {
+  modelViewerImport ??= import("@google/model-viewer");
+  return modelViewerImport;
+}
+
 interface AppProps {
   compact?: boolean;
   tabId?: number;
@@ -498,7 +505,7 @@ function DeepCaptureBar({ attached, disabled, onToggle }: { attached: boolean; d
         <Zap size={15} className={attached ? "text-accent" : "text-slate-400"} />
         <div>
           <div className="text-sm font-medium leading-tight">Deep capture</div>
-          <div className="text-xs text-slate-500">Attach the debugger Network domain.</div>
+          <div className="text-xs text-slate-500">Debugger bytes and closed-shadow capture.</div>
         </div>
       </div>
       <button
@@ -1255,7 +1262,8 @@ function FontPreview({ url, asset }: { url: string; asset: AssetRecord }) {
 
   useEffect(() => {
     let cancelled = false;
-    const face = new FontFace(id.current, `url(${CSS.escape(url)})`);
+    const cssUrl = url.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+    const face = new FontFace(id.current, `url("${cssUrl}")`);
     const timer = window.setTimeout(() => { if (!cancelled) setState("failed"); }, 6000);
     face.load().then((f) => {
       if (cancelled) return;
@@ -1300,6 +1308,28 @@ function ModelPreview({ asset, src }: { asset: AssetRecord; src: string }) {
       </div>
     );
   }
+
+  return <ModelViewerPreview asset={asset} src={src} />;
+}
+
+function ModelViewerPreview({ asset, src }: { asset: AssetRecord; src: string }) {
+  const [state, setState] = useState<"loading" | "ready" | "failed">(() => customElements.get("model-viewer") ? "ready" : "loading");
+
+  useEffect(() => {
+    if (customElements.get("model-viewer")) {
+      setState("ready");
+      return;
+    }
+    let cancelled = false;
+    setState("loading");
+    void ensureModelViewer()
+      .then(() => { if (!cancelled) setState("ready"); })
+      .catch(() => { if (!cancelled) setState("failed"); });
+    return () => { cancelled = true; };
+  }, []);
+
+  if (state === "loading") return <Spinner label="Loading 3D viewer…" />;
+  if (state === "failed") return <FailCard asset={asset} title="Couldn't load 3D viewer" desc="The model preview renderer didn't load. Download to inspect it." />;
 
   return (
     <model-viewer

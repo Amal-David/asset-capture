@@ -3,7 +3,7 @@
 Chrome MV3 extension for capturing, classifying, previewing, and exporting every
 asset a webpage delivers — including assets that are dynamically rendered by APIs
 (fetch/XHR), produced as `blob:`/`data:` URLs, streamed via MSE, or hidden inside
-shadow DOM and stylesheets.
+open shadow DOM and stylesheets.
 
 ## Run
 
@@ -27,19 +27,23 @@ Assets are captured from many independent sources and merged into one record per
 - **DOM**: `img/source/video/audio/track/script/link/iframe/embed/object` plus
   `<image>`/`<use>` SVG sprite refs, `srcset`/`imagesrcset`, and lazyload
   `data-src`/`data-srcset`/`data-bg`/… attributes (captured before scroll).
-- **Shadow DOM**: open *and* force-opened closed roots are descended in scans, the
-  mutation observer, and the element picker.
+- **Shadow DOM**: open roots are descended in scans, the mutation observer, and
+  the element picker. Closed roots are left untouched by default; **Deep capture**
+  can force future roots open only on the inspected tab.
 - **CSS**: `document.styleSheets` + constructable/adopted stylesheets are swept for
   `background-image`/`mask`/`border-image`/`list-style`/`cursor`/`content` url()s,
   `image-set()`, `@font-face src`, and `@import`.
 - **SPA**: `pushState`/`replaceState`/`popstate`/`hashchange` trigger rescans, plus
   backed-off safety passes and a manual **Rescan** button.
-- **Deep capture** (opt-in `chrome.debugger`): `Network.getResponseBody` reads bytes
-  the page never fetched — browser-initiated static assets, opaque cross-origin
-  responses, and service-worker/Cache-API replays.
+- **Deep capture** (runtime-requested `chrome.debugger`): `Network.getResponseBody`
+  reads bytes the page never fetched — browser-initiated static assets, opaque
+  cross-origin responses, and service-worker/Cache-API replays — and opts the
+  inspected tab into closed-shadow capture.
 
 The page-world hooks run as a `MAIN`-world content script at `document_start`, so
-they are installed before the page's own scripts.
+they are installed before the page's own scripts. The service worker ignores
+capture messages and `webRequest` events unless that tab has an active inspector
+surface or recent user action.
 
 ## Intelligent classification
 

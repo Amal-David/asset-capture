@@ -8,7 +8,6 @@ export const manifest = defineManifest({
   description: "Inspect, classify, preview, and export browser-delivered assets in real time.",
   permissions: [
     "activeTab",
-    "debugger",
     "downloads",
     "scripting",
     "sidePanel",
@@ -16,6 +15,7 @@ export const manifest = defineManifest({
     "tabs",
     "webRequest"
   ],
+  optional_permissions: ["debugger"],
   host_permissions: ["<all_urls>"],
   background: {
     service_worker: "src/background/service-worker.ts",

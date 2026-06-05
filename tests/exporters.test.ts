@@ -1,5 +1,5 @@
 import { unzipSync } from "fflate";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildExportPayload } from "../src/shared/exporters";
 import type { AssetRecord, RequestEvent } from "../src/shared/types";
 
@@ -35,6 +35,10 @@ const request: RequestEvent = {
 };
 
 describe("export builders", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
   it("builds redacted JSON metadata", async () => {
     const payload = await buildExportPayload("json", "tab-1", [asset], [request]);
     const text = new TextDecoder().decode(payload.bytes);
@@ -66,6 +70,20 @@ describe("export builders", () => {
     const files = unzipSync(payload.bytes);
     const failures = new TextDecoder().decode(files["failures.json"]);
     expect(failures).toContain("Browser-local URL with no captured bytes");
+    expect(payload.job.failures).toHaveLength(1);
+  });
+
+  it("caps ZIP fallback fetches so huge uncaptured assets do not buffer in memory", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("", {
+      status: 200,
+      headers: { "content-length": String(17 * 1024 * 1024) }
+    })));
+
+    const payload = await buildExportPayload("zip", "tab-1", [{ ...asset, url: "https://cdn.example.com/huge-video.mp4" }], []);
+    const files = unzipSync(payload.bytes);
+    const failures = new TextDecoder().decode(files["failures.json"]);
+
+    expect(failures).toContain("exceeds 16 MB ZIP fallback limit");
     expect(payload.job.failures).toHaveLength(1);
   });
 });

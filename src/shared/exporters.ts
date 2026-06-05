@@ -31,6 +31,8 @@ export interface CapturedBody {
   bytes: Uint8Array;
 }
 
+const MAX_ZIP_FALLBACK_BYTES = 16 * 1024 * 1024;
+
 export async function buildExportPayload(
   type: ExportJob["type"],
   sessionId: string,
@@ -148,10 +150,10 @@ async function buildZip(
     try {
       const response = await fetch(asset.url, { credentials: "omit", cache: "force-cache" });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const arrayBuffer = await response.arrayBuffer();
+      const bytes = await readResponseBytesCapped(response, MAX_ZIP_FALLBACK_BYTES);
       const filename = uniqueName(`assets/${safeFilename(asset.url, asset.id)}`, usedNames);
       const ct = response.headers.get("content-type") ?? asset.mime;
-      files[filename] = redactBodyBytes(new Uint8Array(arrayBuffer), ct, redactionSummary);
+      files[filename] = redactBodyBytes(bytes, ct, redactionSummary);
     } catch (error) {
       failures.push({
         assetId: asset.id,
@@ -163,6 +165,39 @@ async function buildZip(
 
   files["failures.json"] = textBytes(JSON.stringify({ failures }, null, 2));
   return zipSync(files, { level: 6 });
+}
+
+async function readResponseBytesCapped(response: Response, limit: number): Promise<Uint8Array> {
+  const declared = Number(response.headers.get("content-length") ?? "");
+  if (declared && declared > limit) throw new Error(`Asset exceeds ${formatLimit(limit)} ZIP fallback limit`);
+  if (!response.body) {
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    if (bytes.byteLength > limit) throw new Error(`Asset exceeds ${formatLimit(limit)} ZIP fallback limit`);
+    return bytes;
+  }
+
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (!value) continue;
+    total += value.byteLength;
+    if (total > limit) {
+      void reader.cancel();
+      throw new Error(`Asset exceeds ${formatLimit(limit)} ZIP fallback limit`);
+    }
+    chunks.push(value);
+  }
+
+  const merged = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    merged.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return merged;
 }
 
 function redactRequestEvents(requests: RequestEvent[], redactionSummary: Set<string>): RequestEvent[] {
@@ -182,6 +217,10 @@ function redactRequestEvents(requests: RequestEvent[], redactionSummary: Set<str
 
 function textBytes(value: string): Uint8Array {
   return strToU8(value);
+}
+
+function formatLimit(bytes: number): string {
+  return `${Math.round(bytes / (1024 * 1024))} MB`;
 }
 
 function csvCell(value: string): string {

@@ -18,6 +18,8 @@ const SRCSET_ATTRS = ["srcset", "imagesrcset", "data-srcset", "data-lazy-srcset"
 const OBSERVED_ATTRS = ["src", "srcset", "href", "poster", "style", "data-src", "data-srcset", "data-lazy", "data-lazy-src", "data-original", "data-bg", "data-background", "data-poster"];
 const CSS_URL_PROPS = ["background-image", "background", "border-image-source", "border-image", "mask-image", "-webkit-mask-image", "list-style-image", "cursor", "content"];
 const XLINK = "http://www.w3.org/1999/xlink";
+const MAX_BODY_BYTES = 16 * 1024 * 1024;
+const MAX_HOOK_URL_CHARS = 8192;
 
 let scanTimer: number | undefined;
 let flushTimer: number | undefined;
@@ -54,8 +56,8 @@ function handleMutations(records: MutationRecord[]): void {
   if (dirtyElements.size || styleDirty) scheduleFlush();
 }
 
-// Recurse the element tree AND every (open, or force-opened) shadow root so
-// web-component imagery/fonts/sprites inside shadow DOM are captured too.
+// Recurse the element tree and every available shadow root. Closed roots stay
+// closed unless the inspected tab has explicitly enabled deep capture.
 function forEachElementDeep(root: ParentNode, visit: (el: Element) => void): void {
   const elements = root.querySelectorAll<Element>("*");
   for (const el of elements) {
@@ -242,16 +244,24 @@ window.addEventListener("message", (event) => {
   if (event.source !== window) return;
   const data = event.data as { source?: string; payload?: unknown };
   if (data?.source === "asset-inspector-page-hook" && data.payload) {
+    if (!isPageHookEvent(data.payload)) return;
     void chrome.runtime.sendMessage({
       type: "PAGE_HOOK_EVENT",
-      event: data.payload as PageHookEvent,
+      event: data.payload,
       pageUrl: location.href
     } satisfies RuntimeMessage);
     return;
   }
   if (data?.source === "asset-inspector-page-hook-body" && data.payload) {
     const body = data.payload as { key?: string; mime?: string; buffer?: ArrayBuffer };
-    if (!body.key || !body.buffer) return;
+    if (
+      typeof body.key !== "string" ||
+      body.key.length > MAX_HOOK_URL_CHARS ||
+      body.mime !== undefined && typeof body.mime !== "string" ||
+      !(body.buffer instanceof ArrayBuffer) ||
+      body.buffer.byteLength === 0 ||
+      body.buffer.byteLength > MAX_BODY_BYTES
+    ) return;
     void chrome.runtime.sendMessage({
       type: "ASSET_BODY",
       key: body.key,
@@ -261,6 +271,50 @@ window.addEventListener("message", (event) => {
     } satisfies RuntimeMessage);
   }
 });
+
+function isPageHookEvent(value: unknown): value is PageHookEvent {
+  if (!value || typeof value !== "object") return false;
+  const event = value as Partial<PageHookEvent> & Record<string, unknown>;
+  if (typeof event.timestamp !== "number" || !Number.isFinite(event.timestamp)) return false;
+  if (event.mime !== undefined && typeof event.mime !== "string") return false;
+  if (event.size !== undefined && (typeof event.size !== "number" || !Number.isFinite(event.size) || event.size < 0)) return false;
+
+  if (event.kind === "blob") {
+    return (
+      typeof event.blobUrl === "string" &&
+      event.blobUrl.length > 0 &&
+      event.blobUrl.length <= MAX_HOOK_URL_CHARS &&
+      typeof event.producerApi === "string" &&
+      (event.stack === undefined || typeof event.stack === "string") &&
+      (event.hintKind === undefined || isAssetKind(event.hintKind))
+    );
+  }
+  if (event.kind === "blob-revoked") {
+    return typeof event.blobUrl === "string" && event.blobUrl.length > 0 && event.blobUrl.length <= MAX_HOOK_URL_CHARS;
+  }
+  if (event.kind === "data-url") {
+    return typeof event.url === "string" && event.url.length > 0 && event.url.length <= MAX_HOOK_URL_CHARS && typeof event.producerApi === "string";
+  }
+  if (event.kind === "fetch" || event.kind === "xhr") {
+    return (
+      typeof event.url === "string" &&
+      event.url.length > 0 &&
+      event.url.length <= MAX_HOOK_URL_CHARS &&
+      (event.method === undefined || typeof event.method === "string") &&
+      (event.status === undefined || typeof event.status === "number")
+    );
+  }
+  return false;
+}
+
+function isAssetKind(value: unknown): value is AssetRecord["kind"] {
+  return (
+    value === "image" || value === "video" || value === "audio" || value === "font" ||
+    value === "json" || value === "api" || value === "css" || value === "script" ||
+    value === "wasm" || value === "archive" || value === "model" || value === "subtitle" ||
+    value === "manifest" || value === "document" || value === "binary" || value === "unknown"
+  );
+}
 
 chrome.runtime.onMessage.addListener((message: { type: string }, _sender, sendResponse) => {
   if (message.type === "PICKER_ACTIVATE" && window === window.top) {
