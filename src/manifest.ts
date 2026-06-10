@@ -8,7 +8,7 @@ export const manifest = defineManifest({
   manifest_version: 3,
   name: "Universal Asset Inspector",
   short_name: "Asset Inspector",
-  version: "0.1.0",
+  version: "0.2.0",
   description: "Inspect, classify, preview, and export browser-delivered assets in real time.",
   icons: {
     "16": "icons/asset-inspector-16.png",
