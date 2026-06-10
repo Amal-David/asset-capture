@@ -27,11 +27,25 @@ Core capabilities:
 - Live asset table with filtering, sorting, preview status, byte availability, and domain facets.
 - Render-or-hide previews for supported images, video, audio, fonts, text, and glTF models.
 - HLS and DASH stream metadata, including variants, resolution, codecs, segment counts, and DRM indicators.
+- Runtime capture: blob: and data: assets, MediaSource segments, WebSocket binary frames, canvas exports, FontFace loads, and CSS-in-JS injected styles.
+- History replay: open the panel after the page loaded and still see the full asset history (resource timing + buffered runtime events).
+- Works inside about:blank, srcdoc, and blob: frames where embedded players and widgets render.
 - Export as JSON, CSV, URL list, HAR, or ZIP.
 - Redaction for sensitive headers, tokens, credentials, signed query parameters, and high-confidence secret shapes.
 - Optional Deep capture for debugger-backed response bodies and closed-shadow capture on the inspected tab.
 
 The extension scopes capture to tabs with an active inspector surface or recent user action. Deep capture asks for the Chrome debugger permission only when the user turns it on.
+
+## Dashboard Fields
+
+- Category: Developer Tools
+- Language: English
+- Homepage URL: https://github.com/Amal-David/asset-capture
+- Support URL: https://github.com/Amal-David/asset-capture/issues
+- Privacy policy URL: https://github.com/Amal-David/asset-capture/blob/main/PRIVACY.md
+- Single purpose: Asset Lens has a single purpose: let the user inspect, preview, and export the assets (images, media, fonts, scripts, styles, API responses, streams) loaded by the web page they are viewing.
+- Remote code: No, the extension does not use remote code.
+- Data usage: the extension does not collect or transmit any user data; all processing is local (see PRIVACY.md).
 
 ## Permission Justifications
 
