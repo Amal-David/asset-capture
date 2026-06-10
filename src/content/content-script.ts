@@ -16,7 +16,9 @@ const SCAN_DEBOUNCE_MS = 250;
 const URL_ATTRS = ["src", "href", "poster", "data", "data-src", "data-lazy", "data-lazy-src", "data-original", "data-bg", "data-background", "data-poster", "data-thumb", "data-image"];
 const SRCSET_ATTRS = ["srcset", "imagesrcset", "data-srcset", "data-lazy-srcset"];
 const OBSERVED_ATTRS = ["src", "srcset", "href", "poster", "style", "data-src", "data-srcset", "data-lazy", "data-lazy-src", "data-original", "data-bg", "data-background", "data-poster"];
-const CSS_URL_PROPS = ["background-image", "background", "border-image-source", "border-image", "mask-image", "-webkit-mask-image", "list-style-image", "cursor", "content"];
+// Social/preview imagery referenced only from <meta> tags (never fetched by the
+// page itself) — og:image and friends are real page assets users want to grab.
+const META_ASSET_SELECTOR = 'meta[property="og:image"], meta[property="og:image:url"], meta[property="og:image:secure_url"], meta[property="og:video"], meta[property="og:video:url"], meta[property="og:audio"], meta[name="twitter:image"], meta[name="twitter:image:src"], meta[name="twitter:player:stream"], meta[itemprop="image"]';
 const XLINK = "http://www.w3.org/1999/xlink";
 const MAX_BODY_BYTES = 16 * 1024 * 1024;
 const MAX_HOOK_URL_CHARS = 8192;
@@ -112,6 +114,11 @@ function scanDom(): void {
     if (shadow?.adoptedStyleSheets?.length) adopted.push(...shadow.adoptedStyleSheets);
   });
 
+  for (const meta of document.querySelectorAll(META_ASSET_SELECTOR)) {
+    const content = meta.getAttribute("content");
+    if (content) assets.push(assetFromUrl(normalizeUrl(content, location.href), "dom", cssSelector(meta)));
+  }
+
   scanStylesheets(assets, adopted);
   styleDirty = false;
   reobserveLiveRoots();
@@ -175,11 +182,12 @@ function collectSheetUrls(sheet: CSSStyleSheet, assets: AssetDraft[]): void {
 
 function collectRuleUrls(rule: CSSRule, base: string, assets: AssetDraft[]): void {
   if (rule instanceof CSSStyleRule) {
-    for (const prop of CSS_URL_PROPS) {
-      const value = rule.style.getPropertyValue(prop);
-      if (value && value.includes("url(")) {
-        for (const url of extractCssUrls(value, base)) assets.push(assetFromUrl(url, "css"));
-      }
+    // Scan the full rule text rather than a property allowlist: url() can live in
+    // custom properties (--bg: url(...)), masks, shape-outside, cursor fallbacks —
+    // any property, present or future.
+    const text = rule.cssText;
+    if (text.includes("url(") || text.includes("image-set(")) {
+      for (const url of extractCssUrls(text, base)) assets.push(assetFromUrl(url, "css"));
     }
   } else if (rule instanceof CSSImportRule) {
     if (rule.href) assets.push(assetFromUrl(normalizeUrl(rule.href, base), "css"));
@@ -240,6 +248,23 @@ function installSpaRescan(): void {
   for (const delay of [1500, 4000, 8000]) window.setTimeout(() => { styleDirty = true; scheduleScan(); }, delay);
 }
 
+// The background drops capture while the tab isn't being inspected, so hook
+// events that fire before the panel opens would be lost forever (blob:/data:
+// URLs especially have no other discovery path). Keep a bounded ring of recent
+// metadata events and replay it when inspection starts.
+const MAX_HOOK_REPLAY = 1000;
+const hookReplayEvents: PageHookEvent[] = [];
+let hookReplayCursor = 0;
+
+function rememberHookEvent(event: PageHookEvent): void {
+  if (hookReplayEvents.length < MAX_HOOK_REPLAY) {
+    hookReplayEvents.push(event);
+    return;
+  }
+  hookReplayEvents[hookReplayCursor] = event;
+  hookReplayCursor = (hookReplayCursor + 1) % MAX_HOOK_REPLAY;
+}
+
 window.addEventListener("message", (event) => {
   if (event.source !== window) return;
   const data = event.data as { source?: string; payload?: unknown };
@@ -252,6 +277,7 @@ window.addEventListener("message", (event) => {
       scheduleFlush();
       return;
     }
+    rememberHookEvent(data.payload);
     void chrome.runtime.sendMessage({
       type: "PAGE_HOOK_EVENT",
       event: data.payload,
@@ -345,10 +371,57 @@ chrome.runtime.onMessage.addListener((message: { type: string }, _sender, sendRe
   } else if (message.type === "PAGE_RESCAN") {
     styleDirty = true;
     scanDom();
+    replayCapturedHistory();
     sendResponse({ ok: true });
   }
   return false;
 });
+
+// Replay everything this frame saw before inspection started: the full resource
+// timing history (network metadata) plus the buffered page-hook events. Upserts
+// are idempotent (assets key on sessionId:url), so repeated rescans just re-merge.
+function replayCapturedHistory(): void {
+  const drafts: AssetDraft[] = [...overflowResourceDrafts];
+  try {
+    for (const entry of performance.getEntriesByType("resource")) {
+      const draft = assetFromPerformanceEntry(entry as PerformanceResourceTiming);
+      if (draft) drafts.push(draft);
+    }
+  } catch {
+    // Resource timing may be unavailable; hook replay still runs.
+  }
+  const deduped = dedupeAssets(drafts);
+  for (let index = 0; index < deduped.length; index += 500) {
+    sendAssetBatch(deduped.slice(index, index + 500));
+  }
+  for (const event of hookReplayEvents) {
+    void chrome.runtime.sendMessage({
+      type: "PAGE_HOOK_EVENT",
+      event,
+      pageUrl: location.href
+    } satisfies RuntimeMessage);
+  }
+}
+
+// Raise the resource-timing buffer (default 250) so long-lived pages keep their
+// full network history available for replay; when it still fills, preserve the
+// entries (bounded) before clearing so nothing is lost.
+const overflowResourceDrafts: AssetDraft[] = [];
+const MAX_OVERFLOW_DRAFTS = 20_000;
+try {
+  performance.setResourceTimingBufferSize(10_000);
+  performance.addEventListener("resourcetimingbufferfull", () => {
+    if (overflowResourceDrafts.length < MAX_OVERFLOW_DRAFTS) {
+      for (const entry of performance.getEntriesByType("resource")) {
+        const draft = assetFromPerformanceEntry(entry as PerformanceResourceTiming);
+        if (draft) overflowResourceDrafts.push(draft);
+      }
+    }
+    performance.clearResourceTimings();
+  });
+} catch {
+  // Best-effort: live PerformanceObserver capture below still works.
+}
 
 if ("PerformanceObserver" in window) {
   try {
@@ -359,7 +432,8 @@ if ("PerformanceObserver" in window) {
         .filter((asset): asset is AssetDraft => Boolean(asset));
       if (assets.length) sendAssetBatch(assets);
     });
-    perfObserver.observe({ entryTypes: ["resource"] });
+    // buffered: also deliver entries recorded before this observer registered.
+    perfObserver.observe({ type: "resource", buffered: true });
   } catch {
     // Some pages disable resource timing observation; DOM and webRequest capture still continue.
   }
