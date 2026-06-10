@@ -58,7 +58,7 @@ export async function buildExportPayload(
   });
 
   let bytes: Uint8Array;
-  let filename = `asset-inspector-${sessionId}.${type === "url-list" ? "txt" : type}`;
+  let filename = `asset-lens-${sessionId}.${type === "url-list" ? "txt" : type}`;
   let mime = "application/octet-stream";
 
   if (type === "json") {
@@ -72,7 +72,7 @@ export async function buildExportPayload(
     bytes = textBytes(sanitizedAssets.map((asset) => asset.url).join("\n"));
   } else if (type === "har") {
     mime = "application/json";
-    filename = `asset-inspector-${sessionId}.har`;
+    filename = `asset-lens-${sessionId}.har`;
     bytes = textBytes(JSON.stringify(buildHar(sanitizedAssets, redactRequestEvents(requests, redactionSummary)), null, 2));
   } else {
     mime = "application/zip";

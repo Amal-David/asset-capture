@@ -52,7 +52,7 @@ export function deactivatePicker(): void {
 
 function createOverlay() {
   const host = document.createElement("div");
-  host.id = "__asset-inspector-picker";
+  host.id = "__asset-lens-picker";
   host.style.cssText = "all:initial;position:fixed;top:0;left:0;width:0;height:0;z-index:2147483647;pointer-events:none;";
   const root = host.attachShadow({ mode: "closed" });
 

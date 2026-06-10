@@ -94,7 +94,7 @@ export function buildHar(assets: AssetRecord[], requests: RequestEvent[]) {
     log: {
       version: "1.2",
       creator: {
-        name: "Universal Asset Inspector",
+        name: "Asset Lens",
         version: "0.1.0"
       },
       entries

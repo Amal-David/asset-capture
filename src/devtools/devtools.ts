@@ -1,1 +1,1 @@
-chrome.devtools.panels.create("Asset Inspector", "", "src/devtools/panel.html");
+chrome.devtools.panels.create("Asset Lens", "", "src/devtools/panel.html");

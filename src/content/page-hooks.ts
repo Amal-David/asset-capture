@@ -7,12 +7,12 @@
   // "/" restricts delivery to this same window's origin (and handles opaque
   // origins), so captured bytes aren't broadcast to cross-origin frames.
   const post = (payload: unknown) => {
-    window.postMessage({ source: "asset-inspector-page-hook", payload }, "/");
+    window.postMessage({ source: "asset-lens-page-hook", payload }, "/");
   };
 
   const postBody = (key: string, mime: string | undefined, buffer: ArrayBuffer | undefined) => {
     if (!key || !buffer || buffer.byteLength === 0 || buffer.byteLength > MAX_BODY_BYTES) return;
-    window.postMessage({ source: "asset-inspector-page-hook-body", payload: { key, mime, buffer } }, "/");
+    window.postMessage({ source: "asset-lens-page-hook-body", payload: { key, mime, buffer } }, "/");
   };
 
   const captureBlobBody = (key: string, blob: Blob) => {

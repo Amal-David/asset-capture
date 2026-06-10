@@ -10,7 +10,7 @@ class AssetInspectorDatabase extends Dexie {
   assetBodies!: Table<AssetBodyRecord, string>;
 
   constructor() {
-    super("asset-inspector");
+    super("asset-lens");
     this.version(1).stores({
       assets: "id, sessionId, tabId, kind, url, updatedAt",
       requests: "id, sessionId, requestId, tabId, phase, timestamp",

@@ -2,7 +2,7 @@
 
 ## Package
 
-- Upload ZIP: `/Users/amal/Documents/asset-capture/submission/chrome-web-store/universal-asset-inspector-0.1.0.zip`
+- Upload ZIP: `/Users/amal/Documents/asset-capture/submission/chrome-web-store/asset-lens-0.2.0.zip`
 - Unpacked extension path for local testing: `/Users/amal/Documents/asset-capture/dist`
 - Rebuild package command: `npm run package:chrome`
 
@@ -10,7 +10,7 @@
 
 ### Name
 
-Universal Asset Inspector
+Asset Lens
 
 ### Short Description
 
@@ -18,7 +18,7 @@ Inspect, preview, and export the assets a webpage loads in real time.
 
 ### Detailed Description
 
-Universal Asset Inspector is a Chrome extension for developers, designers, QA teams, and technical operators who need to understand what a page actually loads.
+Asset Lens is a Chrome extension for developers, designers, QA teams, and technical operators who need to understand what a page actually loads.
 
 Open the side panel or DevTools panel on a page to inspect discovered images, videos, audio, fonts, scripts, CSS, API responses, manifests, archives, 3D models, and other browser-delivered assets. The extension merges network events, DOM scans, page hooks, stylesheet references, blobs, data URLs, and stream manifests into one searchable asset table.
 
@@ -51,8 +51,8 @@ Data is processed locally in the browser extension. Captured records and capped 
 
 ## Web Store Assets
 
-- Extension icon: `/Users/amal/Documents/asset-capture/public/icons/asset-inspector-128.png`
-- Logo SVG source: `/Users/amal/Documents/asset-capture/public/icons/asset-inspector.svg`
+- Extension icon: `/Users/amal/Documents/asset-capture/public/icons/asset-lens-128.png`
+- Logo SVG source: `/Users/amal/Documents/asset-capture/public/icons/asset-lens.svg`
 - Small promo PNG: `/Users/amal/Documents/asset-capture/submission/chrome-web-store/promo-small.png`
 - Small promo SVG source: `/Users/amal/Documents/asset-capture/submission/chrome-web-store/promo-small.svg`
 

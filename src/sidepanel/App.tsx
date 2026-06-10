@@ -167,7 +167,7 @@ export function App({ compact = false, tabId }: AppProps) {
               <Eye size={17} />
             </div>
             <div className="min-w-0">
-              <h1 className="truncate text-sm font-semibold leading-tight">Asset Inspector</h1>
+              <h1 className="truncate text-sm font-semibold leading-tight">Asset Lens</h1>
               <p className="truncate text-xs text-slate-500">
                 {assets.length} asset{assets.length === 1 ? "" : "s"}
                 {bytesCount > 0 && <span> · {bytesCount} with bytes</span>}

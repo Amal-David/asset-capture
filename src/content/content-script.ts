@@ -268,7 +268,7 @@ function rememberHookEvent(event: PageHookEvent): void {
 window.addEventListener("message", (event) => {
   if (event.source !== window) return;
   const data = event.data as { source?: string; payload?: unknown };
-  if (data?.source === "asset-inspector-page-hook" && data.payload) {
+  if (data?.source === "asset-lens-page-hook" && data.payload) {
     if (!isPageHookEvent(data.payload)) return;
     // CSSOM mutation signal: the page injected/replaced stylesheet rules with no
     // DOM mutation. Re-scan stylesheets locally; nothing to record in the background.
@@ -285,7 +285,7 @@ window.addEventListener("message", (event) => {
     } satisfies RuntimeMessage);
     return;
   }
-  if (data?.source === "asset-inspector-page-hook-body" && data.payload) {
+  if (data?.source === "asset-lens-page-hook-body" && data.payload) {
     const body = data.payload as { key?: string; mime?: string; buffer?: ArrayBuffer };
     if (
       typeof body.key !== "string" ||

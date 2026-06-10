@@ -1,4 +1,4 @@
-# Universal Asset Inspector
+# Asset Lens
 
 Chrome MV3 extension for capturing, classifying, previewing, and exporting every
 asset a webpage delivers — including assets that are dynamically rendered by APIs
@@ -13,7 +13,7 @@ npm run build
 ```
 
 Load `/Users/amal/Documents/asset-capture/dist` as an unpacked extension from
-`chrome://extensions`, then open the side panel (or the DevTools "Asset Inspector"
+`chrome://extensions`, then open the side panel (or the DevTools "Asset Lens"
 panel) on any tab.
 
 ## Capture coverage

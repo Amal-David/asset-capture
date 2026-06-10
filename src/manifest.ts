@@ -6,15 +6,15 @@ const frameFallback = { match_origin_as_fallback: true } as unknown as Record<st
 
 export const manifest = defineManifest({
   manifest_version: 3,
-  name: "Universal Asset Inspector",
-  short_name: "Asset Inspector",
+  name: "Asset Lens",
+  short_name: "Asset Lens",
   version: "0.2.0",
   description: "Inspect, classify, preview, and export browser-delivered assets in real time.",
   icons: {
-    "16": "icons/asset-inspector-16.png",
-    "32": "icons/asset-inspector-32.png",
-    "48": "icons/asset-inspector-48.png",
-    "128": "icons/asset-inspector-128.png"
+    "16": "icons/asset-lens-16.png",
+    "32": "icons/asset-lens-32.png",
+    "48": "icons/asset-lens-48.png",
+    "128": "icons/asset-lens-128.png"
   },
   permissions: [
     "activeTab",
@@ -33,12 +33,12 @@ export const manifest = defineManifest({
   },
   action: {
     default_icon: {
-      "16": "icons/asset-inspector-16.png",
-      "24": "icons/asset-inspector-24.png",
-      "32": "icons/asset-inspector-32.png"
+      "16": "icons/asset-lens-16.png",
+      "24": "icons/asset-lens-24.png",
+      "32": "icons/asset-lens-32.png"
     },
     default_popup: "src/popup/index.html",
-    default_title: "Asset Inspector"
+    default_title: "Asset Lens"
   },
   side_panel: {
     default_path: "src/sidepanel/index.html"

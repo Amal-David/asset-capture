@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128" role="img" aria-labelledby="title desc">
-  <title id="title">Universal Asset Inspector logo</title>
-  <desc id="desc">A teal browser asset tile with a white inspection lens.</desc>
+  <title id="title">Asset Lens logo</title>
+  <desc id="desc">A teal browser asset tile with a white lens.</desc>
   <rect x="16" y="16" width="96" height="96" rx="24" fill="#0f766e"/>
   <path d="M35 38h34v19H35zM78 38h15v15H78zM35 68h18v17H35zM62 68h31v17H62z" fill="#ffffff" opacity="0.2"/>
   <circle cx="58" cy="58" r="24" fill="none" stroke="#ffffff" stroke-width="10"/>
