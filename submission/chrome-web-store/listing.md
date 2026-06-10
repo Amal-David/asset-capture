@@ -70,9 +70,21 @@ Data is processed locally in the browser extension. Captured records and capped 
 - Small promo PNG: `/Users/amal/Documents/asset-capture/submission/chrome-web-store/promo-small.png`
 - Small promo SVG source: `/Users/amal/Documents/asset-capture/submission/chrome-web-store/promo-small.svg`
 
+## Screenshots (1280x800, ready to upload)
+
+- `/Users/amal/Documents/asset-capture/submission/chrome-web-store/screenshots/shot-1-overview.png` — populated asset table with kind facets, deep capture, and HLS stream card.
+- `/Users/amal/Documents/asset-capture/submission/chrome-web-store/screenshots/shot-2-preview.png` — image preview drawer with captured-bytes metadata.
+- `/Users/amal/Documents/asset-capture/submission/chrome-web-store/screenshots/shot-3-images.png` — Image kind filter active (7/22 with Reset).
+
+Screenshots are produced from the real built side panel rendered with sample
+session data (no extension context needed). To regenerate: build, copy
+`screenshot-shim.js` into `dist/shim.js`, create `dist/shot.html` from the
+sidepanel HTML with the shim script injected first, serve `dist/`, and capture
+with headless Chrome at `--window-size=1280,800` (hashes `#preview` / `#images`
+drive the scripted states).
+
 ## Remaining Dashboard Steps
 
-- Capture at least one real screenshot at `1280x800` or `640x400` from the running extension UI.
 - Upload the ZIP package.
 - Upload the 440x280 small promotional image.
 - Complete the privacy fields using the local-processing summary above.
