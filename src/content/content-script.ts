@@ -245,6 +245,13 @@ window.addEventListener("message", (event) => {
   const data = event.data as { source?: string; payload?: unknown };
   if (data?.source === "asset-inspector-page-hook" && data.payload) {
     if (!isPageHookEvent(data.payload)) return;
+    // CSSOM mutation signal: the page injected/replaced stylesheet rules with no
+    // DOM mutation. Re-scan stylesheets locally; nothing to record in the background.
+    if (data.payload.kind === "cssom") {
+      styleDirty = true;
+      scheduleFlush();
+      return;
+    }
     void chrome.runtime.sendMessage({
       type: "PAGE_HOOK_EVENT",
       event: data.payload,
@@ -294,6 +301,18 @@ function isPageHookEvent(value: unknown): value is PageHookEvent {
   }
   if (event.kind === "data-url") {
     return typeof event.url === "string" && event.url.length > 0 && event.url.length <= MAX_HOOK_URL_CHARS && typeof event.producerApi === "string";
+  }
+  if (event.kind === "resource") {
+    return (
+      typeof event.url === "string" &&
+      event.url.length > 0 &&
+      event.url.length <= MAX_HOOK_URL_CHARS &&
+      typeof event.producerApi === "string" &&
+      (event.hintKind === undefined || isAssetKind(event.hintKind))
+    );
+  }
+  if (event.kind === "cssom") {
+    return true;
   }
   if (event.kind === "fetch" || event.kind === "xhr") {
     return (

@@ -20,6 +20,17 @@
     void blob.arrayBuffer().then((buffer) => postBody(key, blob.type || undefined, buffer)).catch(() => undefined);
   };
 
+  // Hook events must be keyed by absolute URLs: a relative fetch("/api/x") must
+  // merge with the webRequest record (and its captured body) for the same request,
+  // not create a second asset keyed by the relative string.
+  const toAbsoluteUrl = (raw: string): string => {
+    try {
+      return new URL(raw, location.href).href;
+    } catch {
+      return raw;
+    }
+  };
+
   const textToBuffer = (value: string): ArrayBuffer => new TextEncoder().encode(value).buffer;
 
   // Read a response body incrementally and abort the moment it exceeds the cap, so
@@ -168,7 +179,7 @@
   window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
     const started = Date.now();
     const response = await originalFetch(input, init);
-    const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    const url = toAbsoluteUrl(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
     const mime = response.headers.get("content-type") ?? undefined;
     post({
       kind: "fetch",
@@ -199,7 +210,7 @@
   const originalSend = XMLHttpRequest.prototype.send;
   XMLHttpRequest.prototype.open = function patchedOpen(method: string, url: string | URL) {
     const xhr = this as XMLHttpRequest & { __assetInspector?: { method: string; url: string; startedAt: number } };
-    xhr.__assetInspector = { method, url: url.toString(), startedAt: Date.now() };
+    xhr.__assetInspector = { method, url: toAbsoluteUrl(url.toString()), startedAt: Date.now() };
     return Reflect.apply(originalOpen, this, arguments);
   };
   XMLHttpRequest.prototype.send = function patchedSend() {
@@ -247,6 +258,144 @@
     fireLocationChange();
   };
   window.addEventListener("popstate", fireLocationChange);
+
+  // CSS-in-JS in production (styled-components, emotion) injects rules through
+  // CSSOM — insertRule / replace / adoptedStyleSheets — which fires NO DOM
+  // mutations, so url() backgrounds and fonts it adds would never be re-scanned.
+  // Signal the content script (throttled) so it re-walks the stylesheets.
+  let cssomTimer: number | undefined;
+  const notifyCssom = () => {
+    if (cssomTimer !== undefined) return;
+    cssomTimer = window.setTimeout(() => {
+      cssomTimer = undefined;
+      post({ kind: "cssom", timestamp: Date.now() });
+    }, 300);
+  };
+
+  try {
+    const sheetProto = CSSStyleSheet.prototype as CSSStyleSheet & {
+      replace?: (text: string) => Promise<CSSStyleSheet>;
+      replaceSync?: (text: string) => void;
+    };
+    const originalInsertRule = sheetProto.insertRule;
+    sheetProto.insertRule = function patchedInsertRule(rule: string, index?: number): number {
+      const result = originalInsertRule.call(this, rule, index);
+      // Only rules that reference assets warrant a re-scan.
+      if (rule.includes("url(")) notifyCssom();
+      return result;
+    };
+    if (sheetProto.replace) {
+      const originalReplace = sheetProto.replace;
+      sheetProto.replace = function patchedReplace(text: string): Promise<CSSStyleSheet> {
+        if (text.includes("url(")) notifyCssom();
+        return originalReplace.call(this, text);
+      };
+    }
+    if (sheetProto.replaceSync) {
+      const originalReplaceSync = sheetProto.replaceSync;
+      sheetProto.replaceSync = function patchedReplaceSync(text: string): void {
+        if (text.includes("url(")) notifyCssom();
+        return originalReplaceSync.call(this, text);
+      };
+    }
+    for (const proto of [Document.prototype, typeof ShadowRoot !== "undefined" ? ShadowRoot.prototype : undefined]) {
+      if (!proto) continue;
+      const descriptor = Object.getOwnPropertyDescriptor(proto, "adoptedStyleSheets");
+      if (!descriptor?.set || !descriptor.get || !descriptor.configurable) continue;
+      Object.defineProperty(proto, "adoptedStyleSheets", {
+        ...descriptor,
+        set(this: Document | ShadowRoot, sheets: CSSStyleSheet[]) {
+          descriptor.set!.call(this, sheets);
+          notifyCssom();
+        }
+      });
+    }
+  } catch {
+    // Stylesheet observation is best-effort; DOM <style>/<link> capture still works.
+  }
+
+  // Fonts loaded through the CSS Font Loading API (new FontFace(..., "url(...)"))
+  // never appear in any stylesheet, so the DOM/CSS scan can't see them.
+  const OriginalFontFace = window.FontFace;
+  if (OriginalFontFace) {
+    class WrappedFontFace extends OriginalFontFace {
+      constructor(family: string, source: string | BufferSource, descriptors?: FontFaceDescriptors) {
+        super(family, source as never, descriptors);
+        try {
+          if (typeof source === "string") {
+            for (const match of source.matchAll(/url\(\s*(?:'([^']*)'|"([^"]*)"|([^)]*?))\s*\)/gi)) {
+              const raw = (match[1] ?? match[2] ?? match[3] ?? "").trim();
+              if (raw) {
+                post({ kind: "resource", url: toAbsoluteUrl(raw), hintKind: "font", producerApi: "FontFace", timestamp: Date.now() });
+              }
+            }
+          }
+        } catch {
+          // Capturing must never break font loading.
+        }
+      }
+    }
+    window.FontFace = WrappedFontFace as typeof FontFace;
+  }
+
+  // Canvas exports are runtime-GENERATED assets (image editors, meme/QR/chart
+  // generators) that exist on no URL at all unless the page object-URLs them.
+  // Capture the produced bytes under a synthetic canvas: key, bounded so a
+  // per-frame toDataURL loop can't flood capture.
+  let canvasCaptures = 0;
+  const MAX_CANVAS_CAPTURES = 24;
+  const nextCanvasKey = () => `canvas:${Date.now().toString(36)}-${canvasCaptures}`;
+
+  const captureCanvasBlob = (blob: Blob | null, producerApi: string) => {
+    if (!blob || canvasCaptures >= MAX_CANVAS_CAPTURES) return;
+    canvasCaptures += 1;
+    const key = nextCanvasKey();
+    post({ kind: "resource", url: key, mime: blob.type || undefined, size: blob.size, hintKind: "image", producerApi, timestamp: Date.now() });
+    captureBlobBody(key, blob);
+  };
+
+  const originalToDataURL = HTMLCanvasElement.prototype.toDataURL;
+  HTMLCanvasElement.prototype.toDataURL = function patchedToDataURL(...args: Parameters<HTMLCanvasElement["toDataURL"]>): string {
+    const result = originalToDataURL.apply(this, args);
+    try {
+      if (canvasCaptures < MAX_CANVAS_CAPTURES && typeof result === "string" && result.startsWith("data:") && result.length > "data:,".length) {
+        canvasCaptures += 1;
+        post({
+          kind: "data-url",
+          url: result.slice(0, 4096),
+          mime: /^data:([^;,]+)/.exec(result)?.[1],
+          size: result.length,
+          producerApi: "HTMLCanvasElement.toDataURL",
+          timestamp: Date.now()
+        });
+      }
+    } catch {
+      // Capturing must never break the page.
+    }
+    return result;
+  };
+
+  const originalToBlob = HTMLCanvasElement.prototype.toBlob;
+  HTMLCanvasElement.prototype.toBlob = function patchedToBlob(callback: BlobCallback, type?: string, quality?: number): void {
+    const wrapped: BlobCallback = (blob) => {
+      try {
+        captureCanvasBlob(blob, "HTMLCanvasElement.toBlob");
+      } catch {
+        // ignore
+      }
+      callback(blob);
+    };
+    return originalToBlob.call(this, wrapped, type, quality);
+  };
+
+  if (typeof OffscreenCanvas !== "undefined" && OffscreenCanvas.prototype.convertToBlob) {
+    const originalConvertToBlob = OffscreenCanvas.prototype.convertToBlob;
+    OffscreenCanvas.prototype.convertToBlob = function patchedConvertToBlob(options?: ImageEncodeOptions): Promise<Blob> {
+      const promise = originalConvertToBlob.call(this, options);
+      promise.then((blob) => captureCanvasBlob(blob, "OffscreenCanvas.convertToBlob")).catch(() => undefined);
+      return promise;
+    };
+  }
 
   const originalReadAsDataURL = FileReader.prototype.readAsDataURL;
   FileReader.prototype.readAsDataURL = function patchedReadAsDataURL(blob: Blob) {

@@ -459,6 +459,26 @@ async function recordPageHookEvent(message: Extract<RuntimeMessage, { type: "PAG
     return;
   }
 
+  // Page-local signal only (stylesheet re-scan); nothing to persist.
+  if (event.kind === "cssom") return;
+
+  // Runtime-API-produced assets (FontFace sources, canvas exports) — no network
+  // request necessarily exists, so the hook event is the only capture path.
+  if (event.kind === "resource") {
+    await upsertAsset({
+      sessionId,
+      tabId,
+      frameId,
+      url: event.url,
+      kind: event.hintKind,
+      mime: event.mime,
+      size: event.size,
+      initiator: pageUrl,
+      sources: ["hook"]
+    });
+    return;
+  }
+
   await upsertAsset({
     sessionId,
     tabId,

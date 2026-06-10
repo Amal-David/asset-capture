@@ -26,6 +26,7 @@ export type CaptureSource =
   | "blob"
   | "data"
   | "media"
+  | "hook"
   | "devtools";
 
 export interface TimingSummary {

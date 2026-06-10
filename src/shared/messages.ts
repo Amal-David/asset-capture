@@ -4,7 +4,12 @@ export type PageHookEvent =
   | { kind: "fetch" | "xhr"; url: string; method?: string; status?: number; mime?: string; size?: number; timestamp: number }
   | { kind: "blob"; blobUrl: string; mime?: string; size?: number; producerApi: string; stack?: string; hintKind?: AssetKind; timestamp: number }
   | { kind: "blob-revoked"; blobUrl: string; timestamp: number }
-  | { kind: "data-url"; url: string; mime?: string; size?: number; producerApi: string; timestamp: number };
+  | { kind: "data-url"; url: string; mime?: string; size?: number; producerApi: string; timestamp: number }
+  // Runtime-API-produced asset with no network request (FontFace source, canvas export).
+  | { kind: "resource"; url: string; mime?: string; size?: number; hintKind?: AssetKind; producerApi: string; timestamp: number }
+  // CSSOM stylesheet mutation signal (insertRule/replace/adoptedStyleSheets);
+  // consumed by the content script to trigger a stylesheet re-scan, never forwarded.
+  | { kind: "cssom"; timestamp: number };
 
 export type RuntimeMessage =
   | {
