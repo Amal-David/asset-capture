@@ -95,3 +95,18 @@ export function parseDashManifest(text: string): ParsedManifest {
 export function parseManifest(kind: "hls" | "dash", text: string): ParsedManifest {
   return kind === "hls" ? parseHlsManifest(text) : parseDashManifest(text);
 }
+
+// Detect a streaming manifest from network metadata (MIME and/or URL path).
+// Players like hls.js fetch manifests via XHR — often from extensionless URLs —
+// so DOM-side `.m3u8`/`.mpd` extension checks alone miss most real streams.
+export function detectStreamingManifest(url: string, mime?: string): "hls" | "dash" | undefined {
+  const normalized = mime?.split(";")[0]?.trim().toLowerCase();
+  if (normalized) {
+    if (normalized.includes("mpegurl")) return "hls";
+    if (normalized === "application/dash+xml") return "dash";
+  }
+  const path = (url.split(/[?#]/)[0] ?? "").toLowerCase();
+  if (path.endsWith(".m3u8")) return "hls";
+  if (path.endsWith(".mpd")) return "dash";
+  return undefined;
+}

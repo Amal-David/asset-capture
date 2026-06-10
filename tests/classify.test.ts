@@ -40,6 +40,11 @@ describe("classifyAsset", () => {
     expect(classifyAsset({ url: "https://cdn.example.com/file", mime: "model/stl" })).toBe("model");
   });
 
+  it("classifies frame navigations as documents", () => {
+    expect(classifyAsset({ url: "https://example.com/", resourceType: "main_frame" })).toBe("document");
+    expect(classifyAsset({ url: "https://example.com/embed", resourceType: "sub_frame" })).toBe("document");
+  });
+
   it("classifies subtitle formats", () => {
     expect(classifyAsset({ url: "https://cdn.example.com/captions.srt" })).toBe("subtitle");
     expect(classifyAsset({ url: "https://cdn.example.com/subs.vtt" })).toBe("subtitle");

@@ -129,6 +129,7 @@ export function classifyAsset(input: ClassificationInput): AssetKind {
   if (resourceType === "media") return "video";
   if (resourceType === "stylesheet") return "css";
   if (resourceType === "image" || resourceType === "font" || resourceType === "script") return resourceType;
+  if (resourceType === "main_frame" || resourceType === "sub_frame") return "document";
 
   if (extension && EXTENSION_KIND[extension]) return EXTENSION_KIND[extension];
   if (input.sources?.includes("fetch") || input.sources?.includes("xhr")) return "api";

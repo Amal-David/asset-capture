@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseDashManifest, parseHlsManifest } from "../src/shared/manifest";
+import { detectStreamingManifest, parseDashManifest, parseHlsManifest } from "../src/shared/manifest";
 
 describe("parseHlsManifest", () => {
   it("extracts variants, resolutions and codecs from a master playlist", () => {
@@ -71,5 +71,26 @@ describe("parseDashManifest", () => {
       <Representation id="1" width="640" height="360" codecs="avc1.42e01e"/>
     </AdaptationSet></Period></MPD>`;
     expect(parseDashManifest(mpd).drmDetected).toBe(true);
+  });
+});
+
+describe("detectStreamingManifest", () => {
+  it("detects HLS by MIME regardless of URL shape (hls.js XHR fetches)", () => {
+    expect(detectStreamingManifest("https://cdn.example.com/stream?id=42", "application/vnd.apple.mpegurl")).toBe("hls");
+    expect(detectStreamingManifest("https://cdn.example.com/stream", "audio/x-mpegurl")).toBe("hls");
+  });
+
+  it("detects DASH by MIME", () => {
+    expect(detectStreamingManifest("https://cdn.example.com/stream", "application/dash+xml; charset=utf-8")).toBe("dash");
+  });
+
+  it("falls back to the URL path extension", () => {
+    expect(detectStreamingManifest("https://cdn.example.com/master.m3u8?token=abc")).toBe("hls");
+    expect(detectStreamingManifest("https://cdn.example.com/manifest.mpd#t=1")).toBe("dash");
+  });
+
+  it("returns undefined for non-manifest assets even with query-string decoys", () => {
+    expect(detectStreamingManifest("https://cdn.example.com/video.mp4?from=master.m3u8", "video/mp4")).toBeUndefined();
+    expect(detectStreamingManifest("https://cdn.example.com/api/data", "application/json")).toBeUndefined();
   });
 });

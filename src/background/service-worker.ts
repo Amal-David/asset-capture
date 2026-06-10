@@ -2,6 +2,7 @@ import { classifyAsset, isGenericMime, isPreviewableKind, sniffMimeFromBytes } f
 import { buildExportPayload, bytesToDataUrl } from "../shared/exporters";
 import { clearSession, db, getSnapshot, sessionIdForTab } from "../shared/db";
 import type { PickerResult, RuntimeMessage, RuntimeResponse } from "../shared/messages";
+import { detectStreamingManifest } from "../shared/manifest";
 import type { AssetRecord, BlobRecord, CaptureSource, MediaRecord, RequestEvent } from "../shared/types";
 import { base64ToBytes, getExtension, inferFrameOrigin, stableId } from "../shared/url";
 import { isTextLikeMime, redactHeaders, redactTextContent } from "../shared/redact";
@@ -733,6 +734,17 @@ async function upsertAsset(input: Partial<AssetRecord> & Pick<AssetRecord, "sess
     };
     await db.assets.put(record);
     return record;
+  }).then(async (record) => {
+    // Network-discovered streaming manifests (hls.js XHR fetches, extensionless
+    // manifest URLs identified by MIME) must produce MediaRecords too — the DOM
+    // scan only ever sees manifests literally referenced in markup.
+    const manifestKind = detectStreamingManifest(record.url, record.mime);
+    if (manifestKind && /^https?:/i.test(record.url)) {
+      const mediaId = `media-${stableId(`${record.sessionId}:${record.url}`)}`;
+      const existing = await db.media.get(mediaId);
+      if (!existing) await upsertMedia({ manifestUrl: record.url, mediaKind: manifestKind }, record.tabId, record.frameId);
+    }
+    return record;
   });
 }
 
@@ -769,7 +781,12 @@ async function setDeepCapture(tabId: number, enabled: boolean): Promise<boolean>
   if (!deepCaptureTabs.has(tabId)) {
     if (!ensureDebuggerListeners()) throw new Error("Chrome debugger API is unavailable.");
     await chrome.debugger.attach(debuggee, "1.3");
-    await chrome.debugger.sendCommand(debuggee, "Network.enable");
+    // Explicit buffer sizing: without it, large or slow response bodies are
+    // evicted from the CDP buffer before Network.getResponseBody can read them.
+    await chrome.debugger.sendCommand(debuggee, "Network.enable", {
+      maxTotalBufferSize: 256 * 1024 * 1024,
+      maxResourceBufferSize: 2 * MAX_STORED_BODY_BYTES
+    });
     await setClosedShadowCapture(tabId, true);
     deepCaptureTabs.add(tabId);
   }
