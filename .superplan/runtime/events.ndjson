@@ -6,3 +6,31 @@
 {"ts":1779451660622,"type":"task.complete_failed","task_id":"T-0002","run_id":"run-20260522115746-ecyysv","command":"task review complete","workflow_phase":"review","source":"unknown","outcome":"error","detail_code":"TASK_NOT_STARTED"}
 {"ts":1779451665717,"type":"task.approved","task_id":"T-0001","run_id":"run-20260522115746-ecyysv","command":"task review approve","workflow_phase":"review","source":"unknown","outcome":"success"}
 {"ts":1779451665720,"type":"overlay.ensure","run_id":"run-20260522115746-ecyysv","command":"task review approve","workflow_phase":"overlay","source":"unknown","outcome":"success","detail_code":"disabled"}
+{"ts":1781051879078,"type":"overlay.ensure","run_id":"run-20260522115746-ecyysv","command":"task scaffold batch","workflow_phase":"overlay","source":"unknown","outcome":"success","detail_code":"disabled"}
+{"ts":1781052059461,"type":"overlay.ensure","run_id":"run-20260522115746-ecyysv","command":"task scaffold batch","workflow_phase":"overlay","source":"unknown","outcome":"success","detail_code":"disabled"}
+{"ts":1781052105310,"type":"task.started","task_id":"T-0101","run_id":"run-20260522115746-ecyysv","command":"run","workflow_phase":"execution","source":"unknown","outcome":"success"}
+{"ts":1781052105315,"type":"overlay.ensure","run_id":"run-20260522115746-ecyysv","command":"run","workflow_phase":"overlay","source":"unknown","outcome":"success","detail_code":"disabled"}
+{"ts":1781052317571,"type":"task.complete_failed","task_id":"T-0101","run_id":"run-20260522115746-ecyysv","command":"task review complete","workflow_phase":"review","source":"unknown","outcome":"error","detail_code":"TASK_NOT_COMPLETE"}
+{"ts":1781052325041,"type":"task.complete_failed","task_id":"T-0101","run_id":"run-20260522115746-ecyysv","command":"task review complete","workflow_phase":"review","source":"unknown","outcome":"error","detail_code":"TASK_NOT_COMPLETE"}
+{"ts":1781052337563,"type":"task.review_requested","task_id":"T-0101","run_id":"run-20260522115746-ecyysv","command":"task review complete","workflow_phase":"review","source":"unknown","outcome":"success"}
+{"ts":1781052337567,"type":"overlay.ensure","run_id":"run-20260522115746-ecyysv","command":"task review complete","workflow_phase":"overlay","source":"unknown","outcome":"success","detail_code":"disabled"}
+{"ts":1781052337675,"type":"task.started","task_id":"T-0102","run_id":"run-20260522115746-ecyysv","command":"run","workflow_phase":"execution","source":"unknown","outcome":"success"}
+{"ts":1781052337680,"type":"overlay.ensure","run_id":"run-20260522115746-ecyysv","command":"run","workflow_phase":"overlay","source":"unknown","outcome":"success","detail_code":"disabled"}
+{"ts":1781052481946,"type":"task.review_requested","task_id":"T-0102","run_id":"run-20260522115746-ecyysv","command":"task review complete","workflow_phase":"review","source":"unknown","outcome":"success"}
+{"ts":1781052481952,"type":"overlay.ensure","run_id":"run-20260522115746-ecyysv","command":"task review complete","workflow_phase":"overlay","source":"unknown","outcome":"success","detail_code":"disabled"}
+{"ts":1781052482071,"type":"task.started","task_id":"T-0103","run_id":"run-20260522115746-ecyysv","command":"run","workflow_phase":"execution","source":"unknown","outcome":"success"}
+{"ts":1781052482075,"type":"overlay.ensure","run_id":"run-20260522115746-ecyysv","command":"run","workflow_phase":"overlay","source":"unknown","outcome":"success","detail_code":"disabled"}
+{"ts":1781052605348,"type":"task.review_requested","task_id":"T-0103","run_id":"run-20260522115746-ecyysv","command":"task review complete","workflow_phase":"review","source":"unknown","outcome":"success"}
+{"ts":1781052605352,"type":"overlay.ensure","run_id":"run-20260522115746-ecyysv","command":"task review complete","workflow_phase":"overlay","source":"unknown","outcome":"success","detail_code":"disabled"}
+{"ts":1781052653646,"type":"task.approved","task_id":"T-0101","run_id":"run-20260522115746-ecyysv","command":"task review approve","workflow_phase":"review","source":"unknown","outcome":"success"}
+{"ts":1781052653651,"type":"overlay.ensure","run_id":"run-20260522115746-ecyysv","command":"task review approve","workflow_phase":"overlay","source":"unknown","outcome":"success","detail_code":"disabled"}
+{"ts":1781052653765,"type":"task.approved","task_id":"T-0102","run_id":"run-20260522115746-ecyysv","command":"task review approve","workflow_phase":"review","source":"unknown","outcome":"success"}
+{"ts":1781052653770,"type":"overlay.ensure","run_id":"run-20260522115746-ecyysv","command":"task review approve","workflow_phase":"overlay","source":"unknown","outcome":"success","detail_code":"disabled"}
+{"ts":1781052653881,"type":"task.approved","task_id":"T-0103","run_id":"run-20260522115746-ecyysv","command":"task review approve","workflow_phase":"review","source":"unknown","outcome":"success"}
+{"ts":1781052653885,"type":"overlay.ensure","run_id":"run-20260522115746-ecyysv","command":"task review approve","workflow_phase":"overlay","source":"unknown","outcome":"success","detail_code":"disabled"}
+{"ts":1781052654005,"type":"task.started","task_id":"T-0104","run_id":"run-20260522115746-ecyysv","command":"run","workflow_phase":"execution","source":"unknown","outcome":"success"}
+{"ts":1781052654009,"type":"overlay.ensure","run_id":"run-20260522115746-ecyysv","command":"run","workflow_phase":"overlay","source":"unknown","outcome":"success","detail_code":"disabled"}
+{"ts":1781052802089,"type":"task.review_requested","task_id":"T-0104","run_id":"run-20260522115746-ecyysv","command":"task review complete","workflow_phase":"review","source":"unknown","outcome":"success"}
+{"ts":1781052802093,"type":"overlay.ensure","run_id":"run-20260522115746-ecyysv","command":"task review complete","workflow_phase":"overlay","source":"unknown","outcome":"success","detail_code":"disabled"}
+{"ts":1781052802205,"type":"task.approved","task_id":"T-0104","run_id":"run-20260522115746-ecyysv","command":"task review approve","workflow_phase":"review","source":"unknown","outcome":"success"}
+{"ts":1781052802209,"type":"overlay.ensure","run_id":"run-20260522115746-ecyysv","command":"task review approve","workflow_phase":"overlay","source":"unknown","outcome":"success","detail_code":"disabled"}
