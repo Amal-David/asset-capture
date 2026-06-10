@@ -1,5 +1,9 @@
 import { defineManifest } from "@crxjs/vite-plugin";
 
+// Chrome supports match_origin_as_fallback (since 105), but the crxjs manifest
+// type doesn't know it yet; spread it in past the excess-property check.
+const frameFallback = { match_origin_as_fallback: true } as unknown as Record<string, never>;
+
 export const manifest = defineManifest({
   manifest_version: 3,
   name: "Universal Asset Inspector",
@@ -45,7 +49,12 @@ export const manifest = defineManifest({
       matches: ["<all_urls>"],
       js: ["src/content/content-script.ts"],
       run_at: "document_start",
-      all_frames: true
+      all_frames: true,
+      // Players, ads, and widgets commonly render inside about:blank / srcdoc /
+      // blob: / data: frames, which match no URL pattern; without these flags
+      // such frames get no content scripts and their assets are invisible.
+      match_about_blank: true,
+      ...frameFallback
     },
     {
       // Page-world hooks must patch fetch/XHR/createObjectURL/history
@@ -55,6 +64,8 @@ export const manifest = defineManifest({
       js: ["src/content/page-hooks.ts"],
       run_at: "document_start",
       all_frames: true,
+      match_about_blank: true,
+      ...frameFallback,
       world: "MAIN"
     }
   ]

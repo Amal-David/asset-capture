@@ -11,6 +11,16 @@ describe("extension manifest permissions", () => {
     expect(source).toContain('optional_permissions: ["debugger"]');
   });
 
+  it("injects content scripts into about:blank/srcdoc/blob frames where players and widgets render", () => {
+    const source = readFileSync(join(process.cwd(), "src/manifest.ts"), "utf8");
+
+    // Two content script entries (isolated + MAIN world); both must opt into
+    // URL-less frames or assets inside embedded players/widgets are invisible.
+    expect(source.match(/match_about_blank: true/g)).toHaveLength(2);
+    expect(source.match(/\.\.\.frameFallback/g)).toHaveLength(2);
+    expect(source).toContain("match_origin_as_fallback: true");
+  });
+
   it("declares Chrome Web Store icon assets for the extension and toolbar action", () => {
     const source = readFileSync(join(process.cwd(), "src/manifest.ts"), "utf8");
 
