@@ -5,7 +5,7 @@ import { defineConfig } from "vite";
 import { manifest } from "./src/manifest";
 
 export default defineConfig({
-  plugins: [react(), crx({ manifest })],
+  plugins: [react(), crx({ manifest, contentScripts: { standaloneFiles: ["src/content/content-script.ts"] } })],
   build: {
     outDir: "dist",
     emptyOutDir: true,

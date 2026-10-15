@@ -85,6 +85,8 @@ For model conversion, download the file and open it in [meshy2glb](https://githu
 
 **Attach** requests Chrome's optional debugger permission for the inspected tab. This enables additional response-body capture and lets the extension open shadow roots created after attachment. **Detach** disconnects the debugger.
 
+Deep capture ends on navigation or reload, tab closure, permission removal, or a debugger detach. Attach again on the new page if needed. A service-worker restart reconciles an existing attachment with Chrome; it does not silently create a new one.
+
 Deep capture can affect page behavior and conflict with DevTools or another debugger. It cannot recover every response or open shadow roots that already exist. Detaching does not close roots already opened by this mode; reload the page to restore its normal behavior.
 
 ## Preview support
@@ -97,7 +99,7 @@ Deep capture can affect page behavior and conflict with DevTools or another debu
 | JSON, APIs, CSS, manifests, subtitles | Text, with JSON formatting where possible. Display is limited to 20,000 characters. |
 | glTF / GLB | Interactive model preview through bundled `model-viewer`. Companion files may be needed. |
 | PDF | Embedded PDF viewer when Chrome supports it in the extension page. |
-| ZIP | Up to 500 entry names and uncompressed sizes, without extracting entries. |
+| ZIP | Up to 500 displayed entry names and uncompressed sizes, without extracting entries. Reading is capped at 16 MiB and 5,000 entries. |
 | Other files | Metadata and download/open actions. |
 
 Captured bytes are preferred when available. Otherwise a preview may request the original URL. Expired URLs, missing companion files, unsupported codecs, or unavailable bytes can prevent a preview even when metadata was captured.
@@ -110,9 +112,11 @@ Captured bytes are preferred when available. Otherwise a preview may request the
 | CSV | Asset ID, type, MIME, status, size, URL, sources, and redaction flags. |
 | URL list | One redacted URL per line. Signed links may no longer work after redaction. |
 | HAR | One entry per asset URL, using the latest retained request's headers. No response bodies; timings are approximate and unknown HTTP versions are left blank. |
-| ZIP | Asset files, `metadata.json`, `requests.har`, and `failures.json`. Stored bytes are used first; missing files are fetched without cookies. |
+| ZIP | Uncompressed asset files, `metadata.json`, `requests.har`, and `failures.json`. Stored bytes are used first; missing files are fetched without cookies. Up to 256 assets and 64 MiB per archive. |
 
 ZIP exports can be partial. Check the failure count in the panel and `failures.json` in the archive. A successful export means Chrome accepted the download request; it does not confirm the file has finished saving.
+
+Only one export runs at a time. **Cancel export** stops preparation and any active fallback request. Preparation stops automatically after two minutes. ZIP files are written without compression to avoid a long compression pass; most images and media are already compressed.
 
 ## Capture coverage
 
@@ -124,7 +128,7 @@ ZIP exports can be partial. Check the failure count in the panel and `failures.j
 | Page history | Available resource timing and a bounded buffer of recent hook metadata, replayed on inspection or rescan. |
 | Deep capture | Additional debugger response bodies and future shadow roots on the attached tab. |
 
-Capture scripts run at document start on matching pages. Persistent recording of ordinary capture messages is gated to tabs with a recently active inspector or capture action. Page hooks and bounded metadata buffering can run before inspection begins; earlier response bodies are not replayed. Reload with the panel open for the best chance of capturing bytes.
+Production capture scripts run synchronously at document start on matching pages. Persistent recording of ordinary capture messages is gated to tabs with a recently active inspector or capture action. Page hooks and bounded metadata buffering can run before inspection begins; earlier response bodies are not replayed. Reload with the panel open to capture startup responses.
 
 ## Permissions
 
@@ -153,11 +157,12 @@ See [PRIVACY.md](PRIVACY.md) for the full policy. Only save assets you own or ha
 ## Limitations
 
 - **Not every asset is recoverable.** Browser-internal pages, the Chrome Web Store, inaccessible frames/stylesheets, worker-only activity, and unavailable response bodies can limit capture.
-- **Very early responses can be missed.** The page hook can run before the content-script bridge finishes loading. A fast startup response may have metadata but no stored bytes; repeat the page action after inspection starts when possible.
-- **16 MiB per captured body.** Larger bodies are skipped. ZIP fallback downloads have the same per-file cap. This is not a total session or archive budget.
+- **Capture budgets.** At most 16 MiB per body, 64 MiB / 4,096 stored bodies per tab, and 256 MiB / 16,384 stored bodies across tabs. Existing captures survive upgrades even if already above a new budget; further growth is refused until space is freed. A notice appears when capture is limited.
+- **Bounded work in each frame.** At most two asynchronous body reads and 32 MiB / 64 pending body transfers. MSE buffers share a 16 MiB budget across up to 16 streams, with at most 1,024 chunks per stream. Busy pages can therefore have metadata-only assets.
+- **Bounded reads.** ZIP fallback and ZIP preview requests stop at 16 MiB, 1,024 chunks, or 15 seconds. Remote text reads stop at 200,000 bytes. Failed or oversized reads are reported instead of returning a partial file.
 - **Streams are not complete recordings.** MSE capture is capped and can contain incomplete or mixed segments. Asset Lens does not decrypt DRM, merge adaptive streams, or guarantee a playable video download.
 - **Bounded request history.** Old request events are periodically pruned toward 5,000 per session. A long session may no longer have headers for its earliest assets.
-- **ZIP exports use memory.** Files are assembled and compressed in memory; exporting a large session can be slow or use substantial RAM. Prefer smaller selections.
+- **Budgets are payload limits, not total browser RAM limits.** Encoding, UI state, metadata, and Chrome's own buffers add overhead. ZIP assembly retains a bounded archive in memory; prefer smaller selections when memory is tight.
 - **Preview support is narrower than detection.** Detecting a model, archive, or media URL does not guarantee it can render inline.
 
 ## Troubleshooting
@@ -169,6 +174,8 @@ See [PRIVACY.md](PRIVACY.md) for the full policy. Only save assets you own or ha
 | A URL downloads but will not preview | Check its format and companion files. Download it and inspect it in a tool that supports the format. |
 | ZIP reports failures | Open `failures.json`. Private, expired, browser-local, or oversized files can fail; select fewer files or capture their bytes first. |
 | Deep capture will not attach | Accept the optional permission and close other debuggers attached to that tab. Some pages cannot be attached. |
+| Deep capture stopped after reload | This is intentional. Attach again on the loaded page. |
+| Capture limit reached | Clear the session or close other inspected tabs to free stored capacity. On a busy page, retry the action after current body reads finish. |
 | A stream fails to play | The stream may require cookies, use an unsupported codec, or be encrypted. Manifest detection does not guarantee playback. |
 | Old assets remain after navigation | Capture is per tab session. Use **Clear session**, then reload or rescan. |
 
@@ -187,7 +194,7 @@ npm run package:chrome           # versioned ZIP in submission/chrome-web-store/
 
 `npm run dev` starts Vite for extension development; it is not a standalone web version of the app. Main-world capture hooks require rebuilding/reloading for reliable verification. No extra page-message permissions are added for hot reload.
 
-The browser smoke test uses an isolated Chromium profile, the built extension, and locally served fixtures. It checks capture, JSON preview, tab switching, filtering, focus, and a 1,000-asset list. Run `UPDATE_SCREENSHOTS=1 npm run test:browser` to refresh the README screenshot from that fixture.
+The browser smoke tests use isolated Chromium profiles, the built extension, and locally served fixtures. They check startup bytes, JSON preview, tab switching, filtering, focus, a 1,000-asset list, capture backpressure, and cancellation of a stalled ZIP request. The debugger check covers attachment, a forced worker restart, navigation, and detach. It grants debugger permission in a temporary test manifest; it does not test the native permission prompt, and the production manifest keeps the permission optional. Run `UPDATE_SCREENSHOTS=1 npm run test:browser` to refresh the README screenshot.
 
 [CI](.github/workflows/test.yml) runs tests, the build, and the browser smoke test on pushes and pull requests. The [review report](docs/REVIEW.md) records verification limits and remaining dependency work.
 
@@ -197,6 +204,7 @@ The browser smoke test uses an isolated Chromium profile, the built extension, a
 src/
   manifest.ts                   Chrome permissions and entrypoints
   background/service-worker.ts  Capture storage, messages, downloads, debugger
+  background/debugger.ts        Attachment ownership and lifecycle
   content/                      Page hooks, DOM/CSS discovery, element picker
   sidepanel/                    React inspector and session state
   popup/                        Compact inspector entrypoint
@@ -206,6 +214,7 @@ src/
 public/icons/                   Extension icons
 tests/                          Regression tests and fixtures
 scripts/browser-smoke.mjs       Chromium extension smoke test
+scripts/debugger-smoke.mjs      Chromium debugger lifecycle check
 docs/                           Review report and screenshots
 submission/                     Chrome Web Store submission material
 ```

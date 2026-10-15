@@ -151,6 +151,8 @@ export interface ExportJob {
 }
 
 export interface SessionSnapshot {
+  captureLimited?: boolean;
+  exportInProgress?: boolean;
   sessionId: string;
   assets: AssetRecord[];
   blobs: BlobRecord[];

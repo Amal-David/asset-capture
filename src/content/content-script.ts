@@ -286,7 +286,8 @@ window.addEventListener("message", (event) => {
     return;
   }
   if (data?.source === "asset-lens-page-hook-body" && data.payload) {
-    const body = data.payload as { key?: string; mime?: string; buffer?: ArrayBuffer };
+    const body = data.payload as { id?: number; key?: string; mime?: string; buffer?: ArrayBuffer };
+    const acknowledge = () => window.postMessage({ source: "asset-lens-body-ack", id: body.id }, "/");
     if (
       typeof body.key !== "string" ||
       body.key.length > MAX_HOOK_URL_CHARS ||
@@ -294,14 +295,17 @@ window.addEventListener("message", (event) => {
       !(body.buffer instanceof ArrayBuffer) ||
       body.buffer.byteLength === 0 ||
       body.buffer.byteLength > MAX_BODY_BYTES
-    ) return;
-    void chrome.runtime.sendMessage({
+    ) { acknowledge(); return; }
+    chrome.runtime.sendMessage({
       type: "ASSET_BODY",
       key: body.key,
       mime: body.mime,
       base64: bytesToBase64(new Uint8Array(body.buffer)),
       pageUrl: location.href
-    } satisfies RuntimeMessage);
+    } satisfies RuntimeMessage, () => {
+      void chrome.runtime.lastError;
+      acknowledge();
+    });
   }
 });
 
@@ -309,6 +313,7 @@ function isPageHookEvent(value: unknown): value is PageHookEvent {
   if (!value || typeof value !== "object") return false;
   const event = value as Partial<PageHookEvent> & Record<string, unknown>;
   if (typeof event.timestamp !== "number" || !Number.isFinite(event.timestamp)) return false;
+  if (event.kind === "capture-limit") return true;
   if (event.mime !== undefined && typeof event.mime !== "string") return false;
   if (event.size !== undefined && (typeof event.size !== "number" || !Number.isFinite(event.size) || event.size < 0)) return false;
 

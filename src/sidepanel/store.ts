@@ -10,6 +10,7 @@ export type StatusFilter = "all" | "ok" | "redirect" | "client-error" | "server-
 interface InspectorState {
   snapshot?: SessionSnapshot;
   loading: boolean;
+  exporting: boolean;
   error?: string;
   // Filtering: an empty kinds set means "all kinds". Multi-select lets the user
   // see e.g. image+video+audio at once instead of cycling single views.
@@ -47,6 +48,7 @@ interface InspectorState {
   rescan: (tabId?: number) => Promise<void>;
   clear: (tabId?: number) => Promise<void>;
   exportAs: (type: ExportJob["type"], tabId?: number, selectedIds?: string[]) => Promise<void>;
+  cancelExport: (tabId?: number) => Promise<void>;
   toggleDeepCapture: (tabId: number, enabled: boolean) => Promise<void>;
   downloadAsset: (url: string, filename?: string, assetId?: string) => Promise<void>;
   getAssetBody: (assetId: string) => Promise<{ mime: string; dataUrl: string; byteLength: number } | null>;
@@ -62,6 +64,7 @@ let inspectedTabId: number | undefined;
 
 export const useInspectorStore = create<InspectorState>((set, get) => ({
   loading: false,
+  exporting: false,
   kinds: new Set<AssetKind>(),
   query: "",
   statusFilter: "all",
@@ -103,7 +106,7 @@ export const useInspectorStore = create<InspectorState>((set, get) => ({
     refreshPending = true;
     if (tabId !== inspectedTabId) {
       inspectedTabId = tabId;
-      set({ snapshot: undefined, selectedIds: new Set(), pickerActive: false, pickerResult: undefined, lastExport: undefined });
+      set({ snapshot: undefined, selectedIds: new Set(), pickerActive: false, pickerResult: undefined, lastExport: undefined, exporting: false });
     }
     // The 1.5s background poll runs silently so it never clears an action error
     // (failed download/export) or flickers the loading state before the user reads it.
@@ -112,7 +115,7 @@ export const useInspectorStore = create<InspectorState>((set, get) => ({
     if (version !== refreshVersion) return;
     refreshPending = false;
     if (response.ok && "snapshot" in response) {
-      const updates: Partial<InspectorState> = { snapshot: response.snapshot, loading: false };
+      const updates: Partial<InspectorState> = { snapshot: response.snapshot, loading: false, exporting: response.snapshot.exportInProgress ?? false };
       if (response.snapshot.pickerActive !== undefined) {
         updates.pickerActive = response.snapshot.pickerActive;
       }
@@ -157,13 +160,19 @@ export const useInspectorStore = create<InspectorState>((set, get) => ({
     await get().refresh(tabId);
   },
   exportAs: async (type, tabId, selectedIds) => {
-    set({ loading: true, error: undefined });
+    const targetTabId = tabId ?? inspectedTabId;
+    set({ exporting: true, error: undefined });
     const response = await sendMessage({ type: "EXPORT", exportType: type, tabId, selectedIds });
+    if (inspectedTabId !== targetTabId) return;
     if (response.ok && "export" in response) {
-      set({ lastExport: response.export.job, loading: false });
+      set({ lastExport: response.export.job, exporting: false });
     } else {
-      set({ error: response.ok ? "Unexpected export response" : response.error, loading: false });
+      set({ error: response.ok ? "Unexpected export response" : response.error, exporting: false });
     }
+  },
+  cancelExport: async (tabId) => {
+    const response = await sendMessage({ type: "CANCEL_EXPORT", tabId });
+    if (!response.ok) set({ error: response.error });
   },
   toggleDeepCapture: async (tabId, enabled) => {
     if (enabled) {

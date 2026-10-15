@@ -8,11 +8,15 @@ Asset Lens is a Chrome extension for inspecting and saving web-page assets. It h
 
 Capture scripts run on pages allowed by Chrome's site-access settings. They inspect asset references, page-level network activity, and some runtime objects. Hooks and bounded metadata buffers can run before you open the inspector.
 
-The background service worker records ordinary capture messages only for tabs with a recently active inspector or capture action. Stored information can include URLs, request and response metadata, DOM references, and size-capped asset bodies. Optional deep capture attaches Chrome's debugger to the inspected tab and can continue until detached or the tab closes.
+The background service worker records ordinary capture messages only for tabs with a recently active inspector or capture action. Stored information can include URLs, request and response metadata, DOM references, and size-capped asset bodies. Optional deep capture attaches Chrome's debugger to the inspected tab. It ends on navigation or reload, detach, tab closure, or removal of debugger permission.
 
 ## Local storage and deletion
 
 Captured records and bytes are stored in IndexedDB inside the extension's browser profile. Original URLs are kept locally so previews and downloads can use them; they may contain signed parameters or other sensitive values.
+
+New captured bodies are limited to 64 MiB / 4,096 bodies per tab and 256 MiB / 16,384 bodies across tabs, with a 16 MiB per-body limit. Existing captures are preserved during upgrades; new bytes can be refused when a budget is reached. Local usage counters record stored byte totals, body counts, and limit notices.
+
+Deep-capture tab IDs are saved in Chrome's session storage so the service worker can reconcile attachment ownership after restarting. This session state is cleared by Chrome when the browser session ends. Restart recovery does not attach to previously unattached tabs.
 
 **Clear session** deletes stored capture for that tab. Closing a tab triggers the same cleanup. At browser startup, the extension attempts to prune data for tabs that no longer exist. Cleanup can be interrupted by a crash or storage failure; closing a tab is not a secure-erasure guarantee. Uninstalling the extension removes its local storage through Chrome.
 

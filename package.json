@@ -8,7 +8,7 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "test": "vitest run",
-    "test:browser": "npm run build && node scripts/browser-smoke.mjs",
+    "test:browser": "npm run build && node scripts/browser-smoke.mjs && node scripts/debugger-smoke.mjs",
     "typecheck": "tsc --noEmit",
     "package:chrome": "npm run build && mkdir -p submission/chrome-web-store && rm -f submission/chrome-web-store/asset-lens-$npm_package_version.zip && cd dist && zip -qr ../submission/chrome-web-store/asset-lens-$npm_package_version.zip ."
   },
@@ -24,17 +24,17 @@
   },
   "devDependencies": {
     "@crxjs/vite-plugin": "^2.4.0",
+    "@tailwindcss/postcss": "4.3.3",
     "@types/chrome": "^0.1.34",
     "@types/node": "^24.10.1",
     "@types/react": "^19.2.7",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^5.1.1",
-    "autoprefixer": "^10.4.22",
     "fake-indexeddb": "6.2.5",
     "jsdom": "^27.2.0",
     "playwright": "1.64.1",
     "postcss": "^8.5.6",
-    "tailwindcss": "^3.4.18",
+    "tailwindcss": "4.3.3",
     "typescript": "^5.9.3",
     "vite": "^7.2.4",
     "vitest": "^4.0.14"

@@ -8,6 +8,8 @@ import { parseManifest } from "../shared/manifest";
 import type { ParsedManifest } from "../shared/manifest";
 import { base64ToBytes, safeFilename } from "../shared/url";
 import { unzipSync } from "fflate";
+import { MAX_BODY_BYTES } from "../shared/limits";
+import { fetchBytesCapped } from "../shared/read-response";
 import "../styles/global.css";
 
 // Static class strings (not interpolated) so Tailwind keeps them at build time.
@@ -69,7 +71,7 @@ export function App({ compact = false, tabId }: AppProps) {
   }, []);
   const {
     snapshot, loading, error, kinds, query, statusFilter, onlyWithBytes, onlyPreviewable, domain, sortKey, sortDir, selectedIds,
-    lastExport, pickerActive, pickerResult,
+    lastExport, pickerActive, pickerResult, exporting, cancelExport,
     toggleKind, clearKinds, setQuery, setStatusFilter, toggleOnlyWithBytes, toggleOnlyPreviewable, setDomain, setSortKey, toggleSortDir, resetFilters,
     toggleSelect, selectMany, clearSelection,
     refresh, rescan, clear, exportAs, toggleDeepCapture, downloadAsset, activatePicker, deactivatePicker, clearPickerResult
@@ -211,7 +213,7 @@ export function App({ compact = false, tabId }: AppProps) {
                 <Crosshair size={16} />
               </IconButton>
             )}
-            <ExportMenu onExport={exportAs} tabId={activeTabId} disabled={!assets.length} />
+            <ExportMenu onExport={exportAs} tabId={activeTabId} disabled={!assets.length || exporting} />
             {!compact && (
               <IconButton title="Rescan page (re-walk DOM, shadow roots & stylesheets)" onClick={() => void rescan(activeTabId)} disabled={!activeTabId}>
                 <ScanSearch size={16} />
@@ -233,7 +235,7 @@ export function App({ compact = false, tabId }: AppProps) {
         <div className="flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-2.5 focus-within:border-accent focus-within:ring-1 focus-within:ring-accent">
           <Search size={15} className="shrink-0 text-slate-400" />
           <input
-            className="min-w-0 flex-1 bg-transparent py-1.5 text-sm outline-none placeholder:text-slate-400"
+            className="min-w-0 flex-1 bg-transparent py-1.5 text-sm outline-hidden placeholder:text-slate-400"
             placeholder="Filter by URL or MIME type"
             aria-label="Filter assets by URL or MIME type"
             value={query}
@@ -288,6 +290,15 @@ export function App({ compact = false, tabId }: AppProps) {
 
       {error && (
         <div className="mx-4 mt-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{error}</div>
+      )}
+      {snapshot?.captureLimited && (
+        <p role="status" className="mx-4 mt-3 text-xs text-amber-700">Capture limit reached. Some files may have metadata only. Clear this session or close other inspected tabs to free space.</p>
+      )}
+      {exporting && (
+        <div role="status" className="mx-4 mt-3 flex items-center justify-between text-sm text-accent">
+          <span>Preparing export…</span>
+          <button onClick={() => void cancelExport(activeTabId)}>Cancel export</button>
+        </div>
       )}
       {lastExport && <ExportNotice job={lastExport} />}
 
@@ -404,7 +415,7 @@ function FilterControls({
   total: number;
   onReset: () => void;
 }) {
-  const selectClass = "rounded-md border border-slate-200 bg-white py-1 pl-2 pr-6 text-xs text-slate-600 outline-none focus:border-accent";
+  const selectClass = "rounded-md border border-slate-200 bg-white py-1 pl-2 pr-6 text-xs text-slate-600 outline-hidden focus:border-accent";
   const filtersActive = showing !== total || statusFilter !== "all" || onlyWithBytes || onlyPreviewable || Boolean(domain);
   return (
     <div className="mt-2 flex flex-wrap items-center gap-1.5 text-xs">
@@ -724,7 +735,7 @@ function BulkBar({ count, onSelectAll, onClear, onCopyUrls, onDownload, onExport
 
 function BulkButton({ icon, label, onClick }: { icon: React.ReactNode; label: string; onClick: () => void }) {
   return (
-    <button className="flex items-center gap-1 rounded-md bg-white px-2 py-1 text-xs font-medium text-teal-800 shadow-sm hover:bg-white/80" onClick={onClick}>
+    <button className="flex items-center gap-1 rounded-md bg-white px-2 py-1 text-xs font-medium text-teal-800 shadow-xs hover:bg-white/80" onClick={onClick}>
       {icon}
       {label}
     </button>
@@ -813,7 +824,7 @@ function AssetList({ assets, loading, hasAssets, onSelect, onContextMenu, select
       aria-label="Captured assets"
       tabIndex={0}
       onKeyDown={onKeyDown}
-      className="relative outline-none"
+      className="relative outline-hidden"
       style={{ height: total * ASSET_ROW_HEIGHT }}
     >
       {windowRows.map((asset, i) => {
@@ -1001,7 +1012,7 @@ function PreviewDrawer({ asset, compact, onClose, onContextMenu }: { asset: Asse
         aria-modal="true"
         aria-label={`Asset preview: ${describeUrl(asset.url).primary}`}
         tabIndex={-1}
-        className={`fixed right-0 top-0 z-50 flex h-full animate-drawer-in flex-col bg-surface shadow-drawer outline-none ${compact ? "w-full" : "w-full max-w-[440px]"}`}
+        className={`fixed right-0 top-0 z-50 flex h-full animate-drawer-in flex-col bg-surface shadow-drawer outline-hidden ${compact ? "w-full" : "w-full max-w-[440px]"}`}
         onContextMenu={(event) => onContextMenu(event, asset)}
       >
         <div className="flex items-center justify-between gap-2 border-b border-slate-200 px-4 py-3">
@@ -1051,7 +1062,7 @@ const TEXT_KINDS: AssetKind[] = ["json", "api", "manifest", "subtitle", "css"];
 // Matches the capture ceiling (page-hooks/service-worker MAX_BODY_BYTES) so the
 // "too large to preview" guard reflects the real limit rather than implying
 // support for sizes that are never stored.
-const LARGE_PREVIEW_BYTES = 16 * 1024 * 1024;
+const LARGE_PREVIEW_BYTES = MAX_BODY_BYTES;
 
 // Orchestrates "render-or-hide": acquire a source (captured bytes preferred as an
 // object URL), then probe whether it actually decodes before showing it. Anything
@@ -1176,25 +1187,36 @@ function ArchivePreview({ src, asset }: { src: string; asset: AssetRecord }) {
   const [entries, setEntries] = useState<Array<{ name: string; size: number }> | null>(null);
   const [state, setState] = useState<"loading" | "ready" | "unsupported" | "error">("loading");
   const isZip = (asset.mime ?? "").includes("zip") || asset.extension === "zip";
+  const [errorMessage, setErrorMessage] = useState("The archive couldn't be parsed. Download to inspect it.");
 
   useEffect(() => {
     if (!isZip) { setState("unsupported"); return; }
     let cancelled = false;
+    const controller = new AbortController();
     setState("loading");
-    void fetch(src).then((r) => r.arrayBuffer()).then((buf) => {
+    void fetchBytesCapped(src, MAX_BODY_BYTES, controller.signal).then(({ bytes }) => {
       if (cancelled) return;
       const list: Array<{ name: string; size: number }> = [];
-      unzipSync(new Uint8Array(buf), { filter: (file) => { list.push({ name: file.name, size: file.originalSize }); return false; } });
+      unzipSync(bytes, { filter: (file) => {
+        if (list.length >= 5000) throw new Error("Archive exceeds the 5,000-entry preview limit. Download to inspect it.");
+        list.push({ name: file.name, size: file.originalSize });
+        return false;
+      } });
       list.sort((a, b) => a.name.localeCompare(b.name));
       setEntries(list);
       setState("ready");
-    }).catch(() => { if (!cancelled) setState("error"); });
-    return () => { cancelled = true; };
+    }).catch((error: unknown) => {
+      if (!cancelled) {
+        setErrorMessage(error instanceof Error ? error.message : "Couldn't read archive");
+        setState("error");
+      }
+    });
+    return () => { cancelled = true; controller.abort(); };
   }, [src, isZip]);
 
   if (state === "loading") return <Spinner label="Reading archive…" />;
   if (state === "unsupported") return <FailCard asset={asset} title={`${(asset.extension ?? "archive").toUpperCase()} archive`} desc="Inline listing supports .zip; download to extract this archive." />;
-  if (state === "error" || !entries) return <FailCard asset={asset} title="Couldn't read archive" desc="The archive couldn't be parsed (cross-origin or bytes not captured). Download to inspect." />;
+  if (state === "error" || !entries) return <FailCard asset={asset} title="Couldn't read archive" desc={errorMessage} />;
   return (
     <div className="max-h-[320px] w-full overflow-auto rounded-md border border-slate-200 bg-white">
       <div className="sticky top-0 border-b border-slate-100 bg-white px-3 py-1.5 text-xs font-medium text-slate-500">{entries.length} entr{entries.length === 1 ? "y" : "ies"}</div>

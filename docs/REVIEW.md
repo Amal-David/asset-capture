@@ -22,6 +22,10 @@ Scope: README and privacy claims, inspector state, preview lifecycle, filtering 
 | P2 | Session deletion could partially succeed across database tables. | Use one Dexie transaction. A simulated storage failure verifies rollback and isolation from other tabs. This does not prevent new capture events from arriving after a clear. |
 | P2 | Request timing entries were retained when a request ended after inspection expired. | Completion/error handlers now delete timing entries even when capture is inactive. Verified by tracing handler control flow; no direct lifecycle integration test. |
 | P2 | README and privacy policy overstated capture completeness, inactivity, redaction, and absence of network requests. | Rewrote both against the manifest and request/storage paths. The README now follows meshy2glb's installation/usage/formats/limitations structure. |
+| P2 | Immediate startup responses could arrive before the asynchronous content-script bridge. | Use CRXJS's standalone synchronous bundle. Chromium now verifies stored bytes from an inline startup fetch. |
+| P2 | Per-file limits did not bound accumulated bodies, queued work, ZIP output, or archive-preview reads. | Add transactional byte/count budgets, bounded page reads/transfers/MSE buffers, cancellable ZIP assembly, and capped/time-limited response reads. Unit and Chromium checks cover the boundaries. |
+| P2 | Debugger state disappeared on worker restart and cleanup could race reattachment. | Persist tab IDs in session storage, verify ownership before restoring, serialize lifecycle changes, and invalidate late events/bodies. Chromium verifies recovery after an actual forced worker stop. |
+| P2 | Seven development dependency advisories remained in the Tailwind 3 chain. | Migrate to Tailwind 4.3.3 and its PostCSS plugin, preserve affected utilities, and remove autoprefixer. The full audit now reports zero advisories. |
 
 Implementation locations: [App.tsx](../src/sidepanel/App.tsx), [store.ts](../src/sidepanel/store.ts), [exporters.ts](../src/shared/exporters.ts), [har.ts](../src/shared/har.ts), [db.ts](../src/shared/db.ts), and [service-worker.ts](../src/background/service-worker.ts).
 
@@ -33,38 +37,53 @@ Implementation locations: [App.tsx](../src/sidepanel/App.tsx), [store.ts](../src
 - Export membership uses a Set instead of repeatedly scanning the selected-ID array.
 - Bulk toolbar actions reuse one filtered selection instead of computing it separately for the count and each action.
 
-Measured Chromium fixture: more than 1,000 asset records, 18 rendered rows, a 517 px scroll viewport, and an 800 px document. This is a rendering-bound check, not a general CPU or latency benchmark.
+Measured Chromium fixture after follow-up: more than 1,000 asset records, 18 rendered rows, a 518 px scroll viewport, and an 800 px document. This is a rendering-bound check, not a general CPU or latency benchmark.
 
-The main app bundle increased from approximately 246 kB to 276 kB minified after the dependency refresh and fixes. The lazy HLS chunk remains about 523 kB and model-viewer about 1,013 kB. Their existing chunk-size warnings remain; this change does not claim smaller downloads.
+The main app bundle increased from approximately 246 kB to 277 kB minified after the dependency refresh and fixes. The lazy HLS chunk remains about 523 kB and model-viewer about 1,013 kB. Their existing chunk-size warnings remain; this change does not claim smaller downloads.
 
 ## Dependency review
 
-The initial `npm audit` reported 18 advisories. Compatible lockfile updates reduced that to 7: 5 high and 2 moderate, all in the development dependency graph. `npm audit --omit=dev` reports zero advisories as of this review.
+The initial `npm audit` reported 18 advisories. Compatible updates reduced that to seven. The authorized follow-up migrated Tailwind 3 to Tailwind 4.3.3 with `@tailwindcss/postcss`, removed autoprefixer, and updated affected shadow and outline utilities. The full `npm audit` now reports zero advisories, including development dependencies.
 
-Remaining packages: `tailwindcss`, `braces`, `chokidar`, `fast-glob`, `micromatch`, `postcss-nested`, and `postcss-selector-parser`. npm recommends Tailwind 4 for the full remediation path. A Tailwind major-version migration requires separate CSS/build verification; it was not forced here. These counts are package advisory reports, not proof that the production extension is exploitable or vulnerability-free.
+The vulnerable Tailwind 3 dependency chain is no longer in the lockfile. The production build, computed theme-color assertion, browser flows, and inspected screenshot verify the migration locally. Audit results describe known package advisories at the time checked, not a guarantee that the extension has no vulnerabilities.
 
 The installed npm 10.9.8 resolver failed internally during updates. npm 11 refreshed the lockfile successfully; ordinary `npm ci` then installed it successfully. See the upstream [npm resolver issue](https://github.com/npm/cli/issues/9787) for similar failures. No legacy peer-dependency or forced-major workaround was applied.
 
 ## Verification
 
 - Baseline: 50 tests passed and the production build passed.
-- Added store, React UI, HAR, and IndexedDB regression coverage; the resulting suite has 65 tests.
+- Added store, React UI, HAR, IndexedDB, budget, read-cancellation, and debugger lifecycle regression coverage; the resulting suite has 85 tests.
 - TypeScript checking is included in `npm run build`.
-- `npm run test:browser` loads the actual built extension in an isolated Chromium profile. It exercises local capture after a page action, persisted JSON bytes, preview focus, tab switching, filtering after scrolling, and virtualization.
+- `npm run test:browser` loads the actual built extension in isolated Chromium profiles. It exercises immediate startup response bytes, ordinary JSON capture, preview focus, tab switching, filtering after scrolling, virtualization, capture backpressure, and cancellation of a stalled HTTP download during ZIP preparation.
+- The debugger browser check grants the existing optional permission in a temporary test manifest. It verifies attach, a forced service-worker stop and restart, navigation-triggered detach, and explicit detach. The attachment survived the forced stop in Chromium and was correctly recovered. The native permission prompt is not exercised; permission-removal events and attach/restore races are covered by unit tests.
 - The README screenshot comes from that local fixture, not a production site or a mock of Chrome messaging.
 - Added a GitHub Actions workflow for tests and the browser smoke check. Local success is not hosted CI proof; inspect the PR checks for the hosted result.
 - No lint command exists in this repository. No separate lint result is claimed.
 
-The simplification review ran sequentially using the reuse, quality, efficiency, and maintainability rubrics. Existing `redactUrl`, `getSnapshot`, `CapturedBody`, and Dexie transaction APIs were reused. One efficiency finding was applied: ZIP body-ID preparation now runs only for ZIP exports. No new general-purpose framework or forwarding wrapper was introduced. The other passes found no further behavior-preserving changes worth applying; a broad component split was left out of this defect-focused change.
+The simplification review ran sequentially using the reuse, quality, efficiency, and maintainability rubrics. Existing redaction, snapshot, and Dexie APIs were reused. Bounded network reads share one implementation; the superseded text reader was removed. Debugger lifecycle handling was separated from capture persistence. ZIP body preparation runs only for ZIP exports, and the archive writer yields between files. No generic workflow framework or forwarding wrapper was added.
+
+## Enforced budgets
+
+| Resource | Limit and outcome |
+| --- | --- |
+| Stored body | 16 MiB maximum. |
+| Stored bodies per tab | 64 MiB and 4,096 records; growth is rejected when either limit is reached. |
+| Stored bodies across tabs | 256 MiB and 16,384 records; enforced in the same transaction as each body write. |
+| Migration | Preserve existing bytes and initialize usage counters. Legacy over-budget data blocks new growth but can be replaced with smaller bodies or explicitly cleared. |
+| Page work | Two concurrent asynchronous body reads; at most 32 MiB / 64 unacknowledged body messages per frame. |
+| MSE copies | 16 MiB total per frame, up to 16 streams and 1,024 chunks per stream. Original playback buffers are left untouched. |
+| Background body writes | Two at once, including debugger body reads. |
+| ZIP | One export at a time, at most 256 selected assets and 64 MiB of archive output. Stored ZIP entries avoid a synchronous compression pass. |
+| Network reads | 16 MiB for ZIP fallback/preview, 200,000 bytes for text, 1,024 chunks, and a 15-second timeout. Cancellation closes the reader/request. |
+| Export duration | Two minutes, with a visible Cancel export control. |
+
+Capture-limit notices persist with the session. ZIP failure reports identify omitted files; archive writer failures abort instead of producing a corrupt ZIP. These are payload/work budgets, not a claim that the browser process's total RAM is capped at the same values.
 
 ## Remaining work
 
-1. **Capture startup ordering (P2).** A very fast local response during page reload produced metadata but no stored bytes in Chromium. The built content script uses an asynchronous import loader, while the page hook runs directly at document start; a bridge-startup race is the likely cause, not yet isolated conclusively. A deliberate page action after inspection was ready did persist bytes. The smoke test asserts that supported path. Investigate a bounded startup handoff or build arrangement without silently expanding always-on recording.
-2. **Aggregate memory budgets (P2).** A 16 MiB per-body cap does not bound a session or ZIP. ZIP compression is synchronous, and remote ZIP preview reads the complete response before listing entries. Add total budgets, cancellation, and bounded preview reads before claiming large-session resilience.
-3. **Debugger lifecycle (P2).** Deep-capture attachment is tracked in service-worker memory. Reconcile real attachments after worker suspension/restart, and test navigation, detach, and permission revocation. Those flows were not exercised here.
-4. **Permissions and distribution.** Broad host access and pre-inspection hooks remain the current design. A per-site opt-in model would change onboarding and capture behavior and needs a separate product decision. Chrome Web Store installation, review status, and publication were not verified.
-5. **Maintenance.** The main UI file remains large. Separate preview components when their behavior next changes, with the current tests protecting state and focus. The repository has no root project license; choose one explicitly before describing it as licensed open-source software.
+1. **Permissions and distribution.** Broad host access and pre-inspection hooks remain the current design. A per-site opt-in model would change onboarding and capture behavior and needs a separate product decision. Chrome Web Store installation, review status, and publication were not verified.
+2. **Maintenance.** The main UI file remains large. Separate preview components when their behavior next changes, with the current tests protecting state and focus. The repository has no root project license; choose one explicitly before describing it as licensed open-source software.
 
-Manual verification still needed: the native Chrome side-panel launcher, DevTools docking, deep capture, real media codecs, model companion files, PDF embedding, file-save dialogs, and long-running sessions on representative sites. No merge, store publication, or deployment is implied by these checks.
+Manual verification still needed: the native Chrome side-panel launcher, DevTools docking and permission prompts, real media codecs, model companion files, PDF embedding, file-save dialogs, and long-running sessions on representative sites. No merge, store publication, or deployment is implied by these checks.
 
 Chrome's [download API documentation](https://developer.chrome.com/docs/extensions/reference/api/downloads) and [tabs API documentation](https://developer.chrome.com/docs/extensions/reference/api/tabs) were checked when describing network behavior and tab tracking.

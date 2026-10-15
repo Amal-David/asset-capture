@@ -89,7 +89,33 @@ describe("export builders", () => {
     const files = unzipSync(payload.bytes);
     const failures = new TextDecoder().decode(files["failures.json"]);
 
-    expect(failures).toContain("exceeds 16 MB ZIP fallback limit");
+    expect(failures).toContain("exceeds 16 MB read limit");
     expect(payload.job.failures).toHaveLength(1);
+  });
+
+  it("bounds aggregate ZIP output and records files that do not fit", async () => {
+    const bytes = new Uint8Array(16 * 1024 * 1024);
+    const assets = Array.from({ length: 5 }, (_, i) => ({ ...asset, id: `asset-${i}`, url: `https://example.com/${i}.png` }));
+    const bodies = new Map(assets.map((item) => [item.id, { mime: "image/png", bytes }]));
+    const payload = await buildExportPayload("zip", "tab-1", assets, [], undefined, bodies);
+    expect(payload.bytes.byteLength).toBeLessThanOrEqual(64 * 1024 * 1024);
+    expect(payload.job.failures).toHaveLength(2);
+    const files = unzipSync(payload.bytes, { filter: (file) => file.name === "failures.json" });
+    expect(JSON.parse(new TextDecoder().decode(files["failures.json"])).failures).toHaveLength(2);
+  });
+
+  it("rejects oversized selections before fetching and propagates cancellation", async () => {
+    const fetcher = vi.fn((_url, options) => new Promise<Response>((_resolve, reject) => {
+      options.signal.addEventListener("abort", () => reject(options.signal.reason), { once: true });
+    }));
+    vi.stubGlobal("fetch", fetcher);
+    await expect(buildExportPayload("zip", "tab-1", Array(257).fill(asset), [])).rejects.toThrow("256 assets");
+    expect(fetcher).not.toHaveBeenCalled();
+    const controller = new AbortController();
+    const exportPromise = buildExportPayload("zip", "tab-1", [asset], [], undefined, undefined, controller.signal);
+    const rejected = expect(exportPromise).rejects.toThrow("Cancelled by user");
+    await vi.waitFor(() => expect(fetcher).toHaveBeenCalledTimes(1));
+    controller.abort(new Error("Cancelled by user"));
+    await rejected;
   });
 });
