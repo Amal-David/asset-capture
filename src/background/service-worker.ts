@@ -626,6 +626,7 @@ async function persistAssetBody(input: {
   }
   // Atomic flag flip + re-classification so a concurrent upsertAsset can't clobber
   // the merge, and so byte-derived knowledge upgrades a previously-binary asset.
+  if (input.signal?.aborted) return;
   const updated = await db.assets.where("id").equals(assetId).modify((asset) => {
     asset.bodyAvailable = true;
     if (sniffed && isGenericMime(asset.mime)) asset.mime = sniffed;
@@ -637,6 +638,7 @@ async function persistAssetBody(input: {
     asset.updatedAt = Date.now();
   });
   if (updated > 0) return;
+  if (input.signal?.aborted) return;
   // Body may arrive before the metadata event; create the asset so it is visible.
   await upsertAsset({ sessionId, tabId, url: key, mime, initiator: pageUrl, sources: [source], bodyAvailable: true, redactionFlags });
 }
