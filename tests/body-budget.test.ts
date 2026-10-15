@@ -45,11 +45,10 @@ it("rolls back bytes and accounting when capture is detached during a write", as
   await putAssetBody(body("a"));
   const controller = new AbortController();
   const put = db.assetBodies.put.bind(db.assetBodies);
-  vi.spyOn(db.assetBodies, "put").mockImplementationOnce(async (...args) => {
-    const key = await put(...args);
+  vi.spyOn(db.assetBodies, "put").mockImplementationOnce((...args) => put(...args).then((key) => {
     controller.abort(new Error("Detached"));
     return key;
-  });
+  }));
   await expect(putAssetBody(body("a", "tab-1", 8), controller.signal)).rejects.toThrow("Detached");
   expect((await db.assetBodies.get("a"))?.byteLength).toBe(16);
   expect((await db.captureUsage.get("tab-1"))?.bodyBytes).toBe(16);
