@@ -41,19 +41,23 @@ export async function buildExportPayload(
   selectedIds?: string[],
   bodies?: Map<string, CapturedBody>
 ): Promise<ExportPayload> {
-  const selected = selectedIds?.length ? assets.filter((asset) => selectedIds.includes(asset.id)) : assets;
+  const selection = selectedIds === undefined ? undefined : new Set(selectedIds);
+  const selected = selection ? assets.filter((asset) => selection.has(asset.id)) : assets;
   const startedAt = Date.now();
   const failures: ExportFailure[] = [];
   const redactionSummary = new Set<string>();
 
   const sanitizedAssets = selected.map((asset) => {
     const redacted = redactUrl(asset.url);
-    redacted.flags.forEach((flag) => redactionSummary.add(flag));
+    const initiator = asset.initiator ? redactUrl(asset.initiator) : undefined;
+    const flags = [...redacted.flags, ...(initiator?.flags ?? [])];
+    flags.forEach((flag) => redactionSummary.add(flag));
     return {
       ...asset,
       url: redacted.value,
       originalUrl: undefined,
-      redactionFlags: Array.from(new Set([...asset.redactionFlags, ...redacted.flags]))
+      initiator: initiator?.value,
+      redactionFlags: Array.from(new Set([...asset.redactionFlags, ...flags]))
     };
   });
 

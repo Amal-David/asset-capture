@@ -1,5 +1,6 @@
 import type { AssetRecord, RequestEvent } from "./types";
 import { redactHeaders, redactUrl } from "./redact";
+import { version } from "../../package.json";
 
 interface HarEntry {
   startedDateTime: string;
@@ -48,19 +49,21 @@ export function buildHar(assets: AssetRecord[], requests: RequestEvent[]) {
   }
 
   const entries: HarEntry[] = assets.map((asset) => {
-    const related = byUrl.get(asset.url) ?? [];
-    const first = related[0];
-    const last = related[related.length - 1];
-    const responseHeaders = redactHeaders(last?.responseHeaders).value ?? {};
-    const requestHeaders = redactHeaders(first?.requestHeaders).value ?? {};
+    const related = [...(byUrl.get(asset.url) ?? [])].sort((a, b) => b.timestamp - a.timestamp);
+    const last = related[0];
+    // Headers arrive in separate phases; only combine phases of the latest
+    // request so repeated loads of one URL do not inherit an older response.
+    const attempt = related.filter((request) => request.requestId === last?.requestId);
+    const responseHeaders = redactHeaders(attempt.find((request) => request.responseHeaders)?.responseHeaders).value ?? {};
+    const requestHeaders = redactHeaders(attempt.find((request) => request.requestHeaders)?.requestHeaders).value ?? {};
     const redactedUrl = redactUrl(asset.url).value;
     return {
       startedDateTime: new Date(asset.timing?.startedAt ?? asset.createdAt).toISOString(),
       time: asset.timing?.durationMs ?? 0,
       request: {
-        method: asset.method ?? first?.method ?? "GET",
+        method: asset.method ?? attempt.find((request) => request.method)?.method ?? "GET",
         url: redactedUrl,
-        httpVersion: "HTTP/2",
+        httpVersion: "",
         headers: toHarHeaders(requestHeaders),
         queryString: toHarQuery(redactedUrl),
         cookies: [],
@@ -70,7 +73,7 @@ export function buildHar(assets: AssetRecord[], requests: RequestEvent[]) {
       response: {
         status: asset.status ?? last?.status ?? 0,
         statusText: "",
-        httpVersion: "HTTP/2",
+        httpVersion: "",
         headers: toHarHeaders(responseHeaders),
         cookies: [],
         content: {
@@ -95,7 +98,7 @@ export function buildHar(assets: AssetRecord[], requests: RequestEvent[]) {
       version: "1.2",
       creator: {
         name: "Asset Lens",
-        version: "0.1.0"
+        version
       },
       entries
     }

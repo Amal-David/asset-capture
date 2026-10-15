@@ -56,6 +56,10 @@ interface InspectorState {
   clearPickerResult: () => void;
 }
 
+let refreshVersion = 0;
+let refreshPending = false;
+let inspectedTabId: number | undefined;
+
 export const useInspectorStore = create<InspectorState>((set, get) => ({
   loading: false,
   kinds: new Set<AssetKind>(),
@@ -94,10 +98,19 @@ export const useInspectorStore = create<InspectorState>((set, get) => ({
   toggleSortDir: () => set((state) => ({ sortDir: state.sortDir === "asc" ? "desc" : "asc" })),
   resetFilters: () => set({ kinds: new Set<AssetKind>(), query: "", statusFilter: "all", onlyWithBytes: false, onlyPreviewable: false, domain: undefined }),
   refresh: async (tabId, silent) => {
+    if (silent && refreshPending && tabId === inspectedTabId) return;
+    const version = ++refreshVersion;
+    refreshPending = true;
+    if (tabId !== inspectedTabId) {
+      inspectedTabId = tabId;
+      set({ snapshot: undefined, selectedIds: new Set(), pickerActive: false, pickerResult: undefined, lastExport: undefined });
+    }
     // The 1.5s background poll runs silently so it never clears an action error
     // (failed download/export) or flickers the loading state before the user reads it.
     if (!silent) set({ loading: true, error: undefined });
     const response = await sendMessage({ type: "GET_SNAPSHOT", tabId });
+    if (version !== refreshVersion) return;
+    refreshPending = false;
     if (response.ok && "snapshot" in response) {
       const updates: Partial<InspectorState> = { snapshot: response.snapshot, loading: false };
       if (response.snapshot.pickerActive !== undefined) {
@@ -110,9 +123,7 @@ export const useInspectorStore = create<InspectorState>((set, get) => ({
       // Prune selection against the live snapshot so deterministic re-captured ids
       // can never silently re-attach a stale selection to assets the user didn't pick.
       const selected = get().selectedIds;
-      // Skip pruning on an empty snapshot (e.g. a transient poll mid-clear) so an
-      // in-progress multi-selection isn't wiped by a momentary empty result.
-      if (selected.size && response.snapshot.assets.length > 0) {
+      if (selected.size) {
         const live = new Set(response.snapshot.assets.map((asset) => asset.id));
         const pruned = new Set([...selected].filter((id) => live.has(id)));
         if (pruned.size !== selected.size) updates.selectedIds = pruned;
@@ -125,7 +136,9 @@ export const useInspectorStore = create<InspectorState>((set, get) => ({
     }
   },
   rescan: async (tabId) => {
+    const targetTabId = tabId ?? inspectedTabId;
     const response = await sendMessage({ type: "RESCAN", tabId });
+    if (inspectedTabId !== targetTabId) return;
     if (!response.ok) {
       set({ error: response.error });
       return;
@@ -133,7 +146,9 @@ export const useInspectorStore = create<InspectorState>((set, get) => ({
     await get().refresh(tabId);
   },
   clear: async (tabId) => {
+    const targetTabId = tabId ?? inspectedTabId;
     const response = await sendMessage({ type: "CLEAR_SESSION", tabId });
+    if (inspectedTabId !== targetTabId) return;
     if (!response.ok) {
       set({ error: response.error });
       return;
@@ -159,6 +174,7 @@ export const useInspectorStore = create<InspectorState>((set, get) => ({
       }
     }
     const response = await sendMessage({ type: "TOGGLE_DEEP_CAPTURE", tabId, enabled });
+    if (inspectedTabId !== tabId) return;
     if (!response.ok) {
       set({ error: response.error });
       return;

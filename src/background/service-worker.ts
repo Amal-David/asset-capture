@@ -1,5 +1,6 @@
 import { classifyAsset, isGenericMime, isPreviewableKind, sniffMimeFromBytes } from "../shared/classify";
 import { buildExportPayload, bytesToDataUrl } from "../shared/exporters";
+import type { CapturedBody } from "../shared/exporters";
 import { clearSession, db, getSnapshot, sessionIdForTab } from "../shared/db";
 import type { PickerResult, RuntimeMessage, RuntimeResponse } from "../shared/messages";
 import { detectStreamingManifest } from "../shared/manifest";
@@ -75,9 +76,10 @@ chrome.webRequest.onHeadersReceived.addListener(
 
 chrome.webRequest.onCompleted.addListener(
   (details) => {
-    if (!shouldCaptureRequest(details)) return;
-    void recordRequest(details, "completed");
-    void upsertAssetFromRequest(details, "webRequest");
+    if (shouldCaptureRequest(details)) {
+      void recordRequest(details, "completed");
+      void upsertAssetFromRequest(details, "webRequest");
+    }
     requestStarts.delete(details.requestId);
   },
   { urls: ["<all_urls>"] },
@@ -86,8 +88,7 @@ chrome.webRequest.onCompleted.addListener(
 
 chrome.webRequest.onErrorOccurred.addListener(
   (details) => {
-    if (!shouldCaptureRequest(details)) return;
-    void recordRequest(details, "error");
+    if (shouldCaptureRequest(details)) void recordRequest(details, "error");
     requestStarts.delete(details.requestId);
   },
   { urls: ["<all_urls>"] }
@@ -245,12 +246,16 @@ async function handleMessage(message: RuntimeMessage, sender: chrome.runtime.Mes
   }
 
   if (message.type === "EXPORT") {
-    const snapshot = await getSnapshot(tabId);
+    const snapshot = await getSnapshot(tabId, message.exportType === "har" || message.exportType === "zip");
     // ZIP embeds bytes; prefer the bytes we already captured (works for blob:/
     // authenticated assets) over a credentialed re-fetch that could leak secrets.
-    const bodies = message.exportType === "zip"
-      ? new Map((await db.assetBodies.where("sessionId").equals(snapshot.sessionId).toArray()).map((body) => [body.assetId, { mime: body.mime, bytes: body.bytes }]))
-      : undefined;
+    let bodies: Map<string, CapturedBody> | undefined;
+    if (message.exportType === "zip") {
+      const selection = message.selectedIds === undefined ? undefined : new Set(message.selectedIds);
+      const bodyIds = snapshot.assets.filter((asset) => !selection || selection.has(asset.id)).map((asset) => asset.id);
+      const records = await db.assetBodies.bulkGet(bodyIds);
+      bodies = new Map(records.flatMap((body) => body ? [[body.assetId, { mime: body.mime, bytes: body.bytes }] as const] : []));
+    }
     const payload = await buildExportPayload(message.exportType, snapshot.sessionId, snapshot.assets, snapshot.requests, message.selectedIds, bodies);
     await db.exports.put(payload.job);
     const url = bytesToDataUrl(payload.bytes, payload.mime);

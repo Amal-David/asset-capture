@@ -32,13 +32,13 @@ export function sessionIdForTab(tabId?: number): string {
   return `tab-${tabId ?? "unknown"}`;
 }
 
-export async function getSnapshot(tabId?: number): Promise<SessionSnapshot> {
+export async function getSnapshot(tabId?: number, includeRequests = false): Promise<SessionSnapshot> {
   const sessionId = sessionIdForTab(tabId);
   const [assets, blobs, media, requests] = await Promise.all([
     db.assets.where("sessionId").equals(sessionId).reverse().sortBy("updatedAt"),
     db.blobs.where("sessionId").equals(sessionId).reverse().sortBy("createdAt"),
     db.media.where("sessionId").equals(sessionId).reverse().sortBy("createdAt"),
-    db.requests.where("sessionId").equals(sessionId).reverse().sortBy("timestamp")
+    includeRequests ? db.requests.where("sessionId").equals(sessionId).reverse().sortBy("timestamp") : Promise.resolve([])
   ]);
   return {
     sessionId,
@@ -52,12 +52,14 @@ export async function getSnapshot(tabId?: number): Promise<SessionSnapshot> {
 
 export async function clearSession(tabId?: number): Promise<void> {
   const sessionId = sessionIdForTab(tabId);
-  await Promise.all([
-    db.assets.where("sessionId").equals(sessionId).delete(),
-    db.requests.where("sessionId").equals(sessionId).delete(),
-    db.blobs.where("sessionId").equals(sessionId).delete(),
-    db.media.where("sessionId").equals(sessionId).delete(),
-    db.exports.where("sessionId").equals(sessionId).delete(),
-    db.assetBodies.where("sessionId").equals(sessionId).delete()
-  ]);
+  await db.transaction("rw", [db.assets, db.requests, db.blobs, db.media, db.exports, db.assetBodies], async () => {
+    await Promise.all([
+      db.assets.where("sessionId").equals(sessionId).delete(),
+      db.requests.where("sessionId").equals(sessionId).delete(),
+      db.blobs.where("sessionId").equals(sessionId).delete(),
+      db.media.where("sessionId").equals(sessionId).delete(),
+      db.exports.where("sessionId").equals(sessionId).delete(),
+      db.assetBodies.where("sessionId").equals(sessionId).delete()
+    ]);
+  });
 }

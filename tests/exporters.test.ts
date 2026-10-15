@@ -40,11 +40,17 @@ describe("export builders", () => {
   });
 
   it("builds redacted JSON metadata", async () => {
-    const payload = await buildExportPayload("json", "tab-1", [asset], [request]);
+    const payload = await buildExportPayload("json", "tab-1", [{ ...asset, initiator: "https://example.com/?token=page-secret" }], [request]);
     const text = new TextDecoder().decode(payload.bytes);
     expect(text).not.toContain("secret");
     expect(text).toContain("[REDACTED]");
     expect(payload.job.redactionSummary).toContain("query:token");
+  });
+
+  it("does not turn an explicitly empty selection into an export of everything", async () => {
+    const payload = await buildExportPayload("json", "tab-1", [asset], [request], []);
+    expect(JSON.parse(new TextDecoder().decode(payload.bytes)).assets).toEqual([]);
+    expect(payload.job.fileCount).toBe(0);
   });
 
   it("builds HAR with redacted headers", async () => {
