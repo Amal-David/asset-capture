@@ -8,6 +8,8 @@ import { parseManifest } from "../shared/manifest";
 import type { ParsedManifest } from "../shared/manifest";
 import { base64ToBytes, safeFilename } from "../shared/url";
 import { unzipSync } from "fflate";
+import { MAX_BODY_BYTES } from "../shared/limits";
+import { fetchBytesCapped } from "../shared/read-response";
 import "../styles/global.css";
 
 // Static class strings (not interpolated) so Tailwind keeps them at build time.
@@ -60,6 +62,7 @@ export function App({ compact = false, tabId }: AppProps) {
   const [activeTabId, setActiveTabId] = useState<number | undefined>(tabId);
   const [selectedAsset, setSelectedAsset] = useState<AssetRecord | null>(null);
   const [menu, setMenu] = useState<{ x: number; y: number; asset: AssetRecord } | null>(null);
+  const closePreview = useCallback(() => setSelectedAsset(null), []);
   const scrollRef = useRef<HTMLDivElement>(null);
   const openMenu = useCallback((event: React.MouseEvent, asset: AssetRecord) => {
     event.preventDefault();
@@ -68,25 +71,42 @@ export function App({ compact = false, tabId }: AppProps) {
   }, []);
   const {
     snapshot, loading, error, kinds, query, statusFilter, onlyWithBytes, onlyPreviewable, domain, sortKey, sortDir, selectedIds,
-    lastExport, pickerActive, pickerResult,
+    lastExport, pickerActive, pickerResult, exporting, cancelExport,
     toggleKind, clearKinds, setQuery, setStatusFilter, toggleOnlyWithBytes, toggleOnlyPreviewable, setDomain, setSortKey, toggleSortDir, resetFilters,
     toggleSelect, selectMany, clearSelection,
     refresh, rescan, clear, exportAs, toggleDeepCapture, downloadAsset, activatePicker, deactivatePicker, clearPickerResult
   } = useInspectorStore();
 
   useEffect(() => {
-    if (tabId) {
-      setActiveTabId(tabId);
-      void refresh(tabId);
+    const selectTab = (id: number | undefined) => {
+      setActiveTabId(id);
+      setSelectedAsset(null);
+      setMenu(null);
+      if (id !== undefined) void refresh(id);
+    };
+    if (tabId !== undefined) {
+      selectTab(tabId);
       return;
     }
+    let disposed = false;
+    let windowId: number | undefined;
     chrome.tabs?.query?.({ active: true, currentWindow: true }, ([tab]) => {
-      setActiveTabId(tab?.id);
-      void refresh(tab?.id);
+      if (disposed) return;
+      windowId = tab?.windowId;
+      selectTab(tab?.id);
     });
+    const onActivated = (info: { tabId: number; windowId: number }) => {
+      if (info.windowId === windowId) selectTab(info.tabId);
+    };
+    chrome.tabs.onActivated.addListener(onActivated);
+    return () => {
+      disposed = true;
+      chrome.tabs.onActivated.removeListener(onActivated);
+    };
   }, [refresh, tabId]);
 
   useEffect(() => {
+    if (activeTabId === undefined) return;
     const timer = window.setInterval(() => void refresh(activeTabId, true), 1500);
     return () => window.clearInterval(timer);
   }, [activeTabId, refresh]);
@@ -150,17 +170,18 @@ export function App({ compact = false, tabId }: AppProps) {
     const dir = sortDir === "asc" ? 1 : -1;
     return [...filtered].sort((a, b) => compareAssets(a, b, sortKey, dir));
   }, [filtered, sortKey, sortDir]);
+  const visibleSelection = useMemo(() => sorted.filter((asset) => selectedIds.has(asset.id)), [sorted, selectedIds]);
 
   // Keep the selected asset's data fresh as the snapshot refreshes (e.g. bytes
   // arrive after metadata) without losing the open drawer.
   const liveSelected = useMemo(
-    () => (selectedAsset ? assets.find((a) => a.id === selectedAsset.id) ?? selectedAsset : null),
+    () => (selectedAsset ? assets.find((a) => a.id === selectedAsset.id) ?? null : null),
     [assets, selectedAsset]
   );
 
   return (
-    <main className={compact ? "flex h-[600px] w-[380px] flex-col bg-panel text-ink" : "flex min-h-screen flex-col bg-panel text-ink"}>
-      <header className="sticky top-0 z-30 border-b border-slate-200 bg-surface/95 px-4 py-3 backdrop-blur">
+    <main className={compact ? "flex h-[600px] w-[380px] flex-col overflow-hidden bg-panel text-ink" : "flex h-screen flex-col overflow-hidden bg-panel text-ink"}>
+      <header className="sticky top-0 z-30 shrink-0 border-b border-slate-200 bg-surface/95 px-4 py-3 backdrop-blur">
         <div className="flex items-center justify-between gap-3">
           <div className="flex min-w-0 items-center gap-2.5">
             <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-accent text-white">
@@ -192,7 +213,7 @@ export function App({ compact = false, tabId }: AppProps) {
                 <Crosshair size={16} />
               </IconButton>
             )}
-            <ExportMenu onExport={exportAs} tabId={activeTabId} disabled={!assets.length} />
+            <ExportMenu onExport={exportAs} tabId={activeTabId} disabled={!assets.length || exporting} />
             {!compact && (
               <IconButton title="Rescan page (re-walk DOM, shadow roots & stylesheets)" onClick={() => void rescan(activeTabId)} disabled={!activeTabId}>
                 <ScanSearch size={16} />
@@ -210,12 +231,13 @@ export function App({ compact = false, tabId }: AppProps) {
         </div>
       </header>
 
-      <div className="border-b border-slate-200 bg-surface px-4 py-2.5">
+      <div className="shrink-0 border-b border-slate-200 bg-surface px-4 py-2.5">
         <div className="flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-2.5 focus-within:border-accent focus-within:ring-1 focus-within:ring-accent">
           <Search size={15} className="shrink-0 text-slate-400" />
           <input
-            className="min-w-0 flex-1 bg-transparent py-1.5 text-sm outline-none placeholder:text-slate-400"
+            className="min-w-0 flex-1 bg-transparent py-1.5 text-sm outline-hidden placeholder:text-slate-400"
             placeholder="Filter by URL or MIME type"
+            aria-label="Filter assets by URL or MIME type"
             value={query}
             onChange={(event) => setQuery(event.target.value)}
           />
@@ -269,23 +291,32 @@ export function App({ compact = false, tabId }: AppProps) {
       {error && (
         <div className="mx-4 mt-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{error}</div>
       )}
+      {snapshot?.captureLimited && (
+        <p role="status" className="mx-4 mt-3 text-xs text-amber-700">Capture limit reached. Some files may have metadata only. Clear this session or close other inspected tabs to free space.</p>
+      )}
+      {exporting && (
+        <div role="status" className="mx-4 mt-3 flex items-center justify-between text-sm text-accent">
+          <span>Preparing export…</span>
+          <button onClick={() => void cancelExport(activeTabId)}>Cancel export</button>
+        </div>
+      )}
       {lastExport && <ExportNotice job={lastExport} />}
 
-      {sorted.some((a) => selectedIds.has(a.id)) && (
+      {visibleSelection.length > 0 && (
         <BulkBar
-          count={sorted.filter((a) => selectedIds.has(a.id)).length}
+          count={visibleSelection.length}
           onSelectAll={() => selectMany(sorted.map((a) => a.id))}
           onClear={clearSelection}
           onCopyUrls={() => {
-            const urls = sorted.filter((a) => selectedIds.has(a.id)).map((a) => a.url).join("\n");
+            const urls = visibleSelection.map((a) => a.url).join("\n");
             void navigator.clipboard.writeText(urls);
           }}
           onDownload={() => {
-            for (const asset of sorted.filter((a) => selectedIds.has(a.id))) {
+            for (const asset of visibleSelection) {
               void downloadAsset(asset.url, safeFilename(asset.url, asset.id), asset.id);
             }
           }}
-          onExportZip={() => void exportAs("zip", activeTabId, [...selectedIds])}
+          onExportZip={() => void exportAs("zip", activeTabId, visibleSelection.map((asset) => asset.id))}
         />
       )}
 
@@ -305,7 +336,7 @@ export function App({ compact = false, tabId }: AppProps) {
       </div>
 
       {liveSelected && (
-        <PreviewDrawer asset={liveSelected} compact={compact} onClose={() => setSelectedAsset(null)} onContextMenu={openMenu} />
+        <PreviewDrawer key={liveSelected.id} asset={liveSelected} compact={compact} onClose={closePreview} onContextMenu={openMenu} />
       )}
 
       {menu && <AssetContextMenu menu={menu} onClose={() => setMenu(null)} />}
@@ -317,6 +348,7 @@ function IconButton({ children, title, onClick, disabled, active }: { children: 
   return (
     <button
       title={title}
+      aria-label={title}
       disabled={disabled}
       onClick={onClick}
       className={`rounded-lg p-2 transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
@@ -332,6 +364,7 @@ function Chip({ label, count, active, onClick }: { label: string; count: number;
   return (
     <button
       onClick={onClick}
+      aria-pressed={active}
       className={`flex shrink-0 items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-medium capitalize transition-colors ${
         active ? "border-accent bg-accent text-white" : "border-slate-200 bg-white text-slate-600 hover:border-slate-300 hover:bg-slate-50"
       }`}
@@ -382,7 +415,7 @@ function FilterControls({
   total: number;
   onReset: () => void;
 }) {
-  const selectClass = "rounded-md border border-slate-200 bg-white py-1 pl-2 pr-6 text-xs text-slate-600 outline-none focus:border-accent";
+  const selectClass = "rounded-md border border-slate-200 bg-white py-1 pl-2 pr-6 text-xs text-slate-600 outline-hidden focus:border-accent";
   const filtersActive = showing !== total || statusFilter !== "all" || onlyWithBytes || onlyPreviewable || Boolean(domain);
   return (
     <div className="mt-2 flex flex-wrap items-center gap-1.5 text-xs">
@@ -471,14 +504,16 @@ function ExportMenu({ onExport, tabId, disabled }: { onExport: (type: ExportJob[
         className={`flex items-center gap-1 rounded-lg px-2.5 py-2 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
           open ? "bg-accent-soft text-accent" : "text-slate-500 hover:bg-slate-100 hover:text-slate-800"
         }`}
-        title="Export captured assets"
+        title="Export all captured assets"
+        aria-label="Export all captured assets"
+        aria-expanded={open}
       >
         <Download size={16} />
         <ChevronDown size={13} className={`transition-transform ${open ? "rotate-180" : ""}`} />
       </button>
       {open && (
         <div className="absolute right-0 z-50 mt-1 w-52 animate-fade-in overflow-hidden rounded-lg border border-slate-200 bg-white py-1 shadow-menu">
-          <div className="px-3 py-1 text-[10px] font-semibold uppercase tracking-wide text-slate-400">Export as</div>
+          <div className="px-3 py-1 text-[10px] font-semibold uppercase tracking-wide text-slate-400">Export all assets as</div>
           {EXPORTS.map((item) => (
             <button
               key={item.type}
@@ -536,7 +571,7 @@ function ExportNotice({ job }: { job: ExportJob }) {
 function StreamsPanel({ media, tabId }: { media: MediaRecord[]; tabId?: number }) {
   const [open, setOpen] = useState(true);
   return (
-    <section className="mx-4 mt-3 overflow-hidden rounded-lg border border-slate-200 bg-surface shadow-card">
+    <section className="mx-4 mt-3 max-h-[30vh] shrink-0 overflow-y-auto rounded-lg border border-slate-200 bg-surface shadow-card">
       <button className="flex w-full items-center gap-2 px-3 py-2 text-left" onClick={() => setOpen((value) => !value)}>
         <Film size={15} className="text-accent" />
         <span className="text-sm font-medium">Streams</span>
@@ -558,6 +593,7 @@ function ManifestCard({ record, tabId }: { record: MediaRecord; tabId?: number }
   const [state, setState] = useState<"loading" | "ready" | "error">("loading");
   const [play, setPlay] = useState(false);
   const [playError, setPlayError] = useState(false);
+  const [errorMessage, setErrorMessage] = useState("Couldn't read manifest (cross-origin or offline).");
   const kind = record.mediaKind === "dash" ? "dash" : "hls";
   const canPlay = record.mediaKind === "hls" && state === "ready" && parsed != null && !parsed.drmDetected;
 
@@ -565,8 +601,21 @@ function ManifestCard({ record, tabId }: { record: MediaRecord; tabId?: number }
     if (record.mediaKind !== "hls" && record.mediaKind !== "dash") { setState("error"); return; }
     let cancelled = false;
     setState("loading");
+    setParsed(null);
+    setPlay(false);
+    setErrorMessage("Couldn't read manifest (cross-origin or offline).");
     void fetchText(record.manifestUrl, tabId).then((res) => {
       if (cancelled) return;
+      if (res && !res.ok) {
+        setErrorMessage(`Couldn't read manifest (HTTP ${res.status ?? "error"}).`);
+        setState("error");
+        return;
+      }
+      if (res?.truncated) {
+        setErrorMessage("Manifest exceeds the text preview limit. Download it to inspect.");
+        setState("error");
+        return;
+      }
       if (!res || !res.content) { setState("error"); return; }
       try { setParsed(parseManifest(kind, res.content)); setState("ready"); } catch { setState("error"); }
     });
@@ -598,7 +647,7 @@ function ManifestCard({ record, tabId }: { record: MediaRecord; tabId?: number }
       {play && !playError && <div className="mt-2"><HlsPlayer src={record.manifestUrl} onError={() => setPlayError(true)} /></div>}
       {play && playError && <div className="mt-1 text-xs text-slate-400">Stream couldn't be played here (codec/CORS/DRM). Open the manifest to inspect.</div>}
       {state === "loading" && <div className="mt-1 text-xs text-slate-400">Parsing manifest…</div>}
-      {state === "error" && <div className="mt-1 text-xs text-slate-400">Couldn't read manifest (cross-origin or offline).</div>}
+      {state === "error" && <div className="mt-1 text-xs text-slate-400">{errorMessage}</div>}
       {state === "ready" && parsed && (
         <div className="mt-1.5 space-y-0.5 text-xs text-slate-500">
           {parsed.resolutions.length > 0 && <div><span className="text-slate-400">Resolutions:</span> {parsed.resolutions.join(", ")}</div>}
@@ -686,7 +735,7 @@ function BulkBar({ count, onSelectAll, onClear, onCopyUrls, onDownload, onExport
 
 function BulkButton({ icon, label, onClick }: { icon: React.ReactNode; label: string; onClick: () => void }) {
   return (
-    <button className="flex items-center gap-1 rounded-md bg-white px-2 py-1 text-xs font-medium text-teal-800 shadow-sm hover:bg-white/80" onClick={onClick}>
+    <button className="flex items-center gap-1 rounded-md bg-white px-2 py-1 text-xs font-medium text-teal-800 shadow-xs hover:bg-white/80" onClick={onClick}>
       {icon}
       {label}
     </button>
@@ -716,7 +765,7 @@ function AssetList({ assets, loading, hasAssets, onSelect, onContextMenu, select
 
   const total = assets.length;
   const overscan = 8;
-  const start = Math.max(0, Math.floor(view.top / ASSET_ROW_HEIGHT) - overscan);
+  const start = Math.min(Math.max(0, total - 1), Math.max(0, Math.floor(view.top / ASSET_ROW_HEIGHT) - overscan));
   const end = Math.min(total, Math.ceil((view.top + view.height) / ASSET_ROW_HEIGHT) + overscan);
   const windowRows = assets.slice(start, end);
 
@@ -775,7 +824,7 @@ function AssetList({ assets, loading, hasAssets, onSelect, onContextMenu, select
       aria-label="Captured assets"
       tabIndex={0}
       onKeyDown={onKeyDown}
-      className="relative outline-none"
+      className="relative outline-hidden"
       style={{ height: total * ASSET_ROW_HEIGHT }}
     >
       {windowRows.map((asset, i) => {
@@ -963,7 +1012,7 @@ function PreviewDrawer({ asset, compact, onClose, onContextMenu }: { asset: Asse
         aria-modal="true"
         aria-label={`Asset preview: ${describeUrl(asset.url).primary}`}
         tabIndex={-1}
-        className={`fixed right-0 top-0 z-50 flex h-full animate-drawer-in flex-col bg-surface shadow-drawer outline-none ${compact ? "w-full" : "w-full max-w-[440px]"}`}
+        className={`fixed right-0 top-0 z-50 flex h-full animate-drawer-in flex-col bg-surface shadow-drawer outline-hidden ${compact ? "w-full" : "w-full max-w-[440px]"}`}
         onContextMenu={(event) => onContextMenu(event, asset)}
       >
         <div className="flex items-center justify-between gap-2 border-b border-slate-200 px-4 py-3">
@@ -1013,7 +1062,7 @@ const TEXT_KINDS: AssetKind[] = ["json", "api", "manifest", "subtitle", "css"];
 // Matches the capture ceiling (page-hooks/service-worker MAX_BODY_BYTES) so the
 // "too large to preview" guard reflects the real limit rather than implying
 // support for sizes that are never stored.
-const LARGE_PREVIEW_BYTES = 16 * 1024 * 1024;
+const LARGE_PREVIEW_BYTES = MAX_BODY_BYTES;
 
 // Orchestrates "render-or-hide": acquire a source (captured bytes preferred as an
 // object URL), then probe whether it actually decodes before showing it. Anything
@@ -1081,11 +1130,17 @@ function usePreviewProbe(kind: "image" | "video" | "audio", src: string): "loadi
   const [state, setState] = useState<"loading" | "ready" | "failed">("loading");
   useEffect(() => {
     let cancelled = false;
+    let settled = false;
     setState("loading");
-    const settle = (ok: boolean) => { if (!cancelled) setState(ok ? "ready" : "failed"); };
+    const settle = (ok: boolean) => {
+      if (cancelled || settled) return;
+      settled = true;
+      window.clearTimeout(timer);
+      setState(ok ? "ready" : "failed");
+    };
+    const timer = window.setTimeout(() => settle(false), 12000);
     if (kind === "image") {
       const img = new Image();
-      const timer = window.setTimeout(() => settle(false), 12000); // stalled CDN image
       img.onload = () => { window.clearTimeout(timer); settle(true); };
       img.onerror = () => { window.clearTimeout(timer); settle(false); };
       img.src = src;
@@ -1099,7 +1154,6 @@ function usePreviewProbe(kind: "image" | "video" | "audio", src: string): "loadi
     el.addEventListener("canplay", ok, { once: true });
     el.addEventListener("error", bad, { once: true });
     el.src = src;
-    const timer = window.setTimeout(() => settle(false), 12000);
     return () => { cancelled = true; window.clearTimeout(timer); el.removeAttribute("src"); el.load(); };
   }, [kind, src]);
   return state;
@@ -1133,25 +1187,36 @@ function ArchivePreview({ src, asset }: { src: string; asset: AssetRecord }) {
   const [entries, setEntries] = useState<Array<{ name: string; size: number }> | null>(null);
   const [state, setState] = useState<"loading" | "ready" | "unsupported" | "error">("loading");
   const isZip = (asset.mime ?? "").includes("zip") || asset.extension === "zip";
+  const [errorMessage, setErrorMessage] = useState("The archive couldn't be parsed. Download to inspect it.");
 
   useEffect(() => {
     if (!isZip) { setState("unsupported"); return; }
     let cancelled = false;
+    const controller = new AbortController();
     setState("loading");
-    void fetch(src).then((r) => r.arrayBuffer()).then((buf) => {
+    void fetchBytesCapped(src, MAX_BODY_BYTES, controller.signal).then(({ bytes }) => {
       if (cancelled) return;
       const list: Array<{ name: string; size: number }> = [];
-      unzipSync(new Uint8Array(buf), { filter: (file) => { list.push({ name: file.name, size: file.originalSize }); return false; } });
+      unzipSync(bytes, { filter: (file) => {
+        if (list.length >= 5000) throw new Error("Archive exceeds the 5,000-entry preview limit. Download to inspect it.");
+        list.push({ name: file.name, size: file.originalSize });
+        return false;
+      } });
       list.sort((a, b) => a.name.localeCompare(b.name));
       setEntries(list);
       setState("ready");
-    }).catch(() => { if (!cancelled) setState("error"); });
-    return () => { cancelled = true; };
+    }).catch((error: unknown) => {
+      if (!cancelled) {
+        setErrorMessage(error instanceof Error ? error.message : "Couldn't read archive");
+        setState("error");
+      }
+    });
+    return () => { cancelled = true; controller.abort(); };
   }, [src, isZip]);
 
   if (state === "loading") return <Spinner label="Reading archive…" />;
   if (state === "unsupported") return <FailCard asset={asset} title={`${(asset.extension ?? "archive").toUpperCase()} archive`} desc="Inline listing supports .zip; download to extract this archive." />;
-  if (state === "error" || !entries) return <FailCard asset={asset} title="Couldn't read archive" desc="The archive couldn't be parsed (cross-origin or bytes not captured). Download to inspect." />;
+  if (state === "error" || !entries) return <FailCard asset={asset} title="Couldn't read archive" desc={errorMessage} />;
   return (
     <div className="max-h-[320px] w-full overflow-auto rounded-md border border-slate-200 bg-white">
       <div className="sticky top-0 border-b border-slate-100 bg-white px-3 py-1.5 text-xs font-medium text-slate-500">{entries.length} entr{entries.length === 1 ? "y" : "ies"}</div>

@@ -1,6 +1,6 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss" source(none);
+@config "../../tailwind.config.ts";
+@source "../";
 
 :root {
   color: #17212b;

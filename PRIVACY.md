@@ -1,73 +1,52 @@
 # Asset Lens — Privacy Policy
 
-_Last updated: June 10, 2026_
+Last updated: October 15, 2026
 
-Asset Lens is a Chrome extension that lets you inspect, preview, and export the
-assets (images, video, audio, fonts, scripts, styles, API responses, streams)
-loaded by the web page you are viewing.
-
-## Summary
-
-**Asset Lens does not collect, transmit, sell, or share any user data.**
-Everything the extension captures is processed and stored locally in your
-browser and never leaves your device unless you explicitly export it yourself.
+Asset Lens is a Chrome extension for inspecting and saving web-page assets. It has no account system, analytics, telemetry, or project-operated backend. Captures are not uploaded to a project server.
 
 ## What the extension processes
 
-When you open the Asset Lens panel on a tab (or trigger a capture action), the
-extension observes, for that tab only:
+Capture scripts run on pages allowed by Chrome's site-access settings. They inspect asset references, page-level network activity, and some runtime objects. Hooks and bounded metadata buffers can run before you open the inspector.
 
-- Network request and response **metadata** (URLs, headers, MIME types, sizes,
-  timings) for assets the page loads.
-- Asset references found in the page's DOM and stylesheets.
-- Asset bytes (size-capped) for previews and exports, including blob: and
-  data: assets created at runtime by the page.
+The background service worker records ordinary capture messages only for tabs with a recently active inspector or capture action. Stored information can include URLs, request and response metadata, DOM references, and size-capped asset bodies. Optional deep capture attaches Chrome's debugger to the inspected tab. It ends on navigation or reload, detach, tab closure, or removal of debugger permission.
 
-Capture is scoped to tabs with an active inspector surface or recent user
-action. The optional "Deep capture" mode additionally uses Chrome's debugger
-API on the inspected tab, and only after you accept Chrome's permission prompt.
+## Local storage and deletion
 
-## Where data is stored
+Captured records and bytes are stored in IndexedDB inside the extension's browser profile. Original URLs are kept locally so previews and downloads can use them; they may contain signed parameters or other sensitive values.
 
-All captured records and bytes are stored in the extension's **local
-IndexedDB** inside your browser profile. Records are kept per tab session and
-are deleted when the tab closes (orphaned data is pruned on browser startup).
-You can also clear a session at any time from the panel.
+New captured bodies are limited to 64 MiB / 4,096 bodies per tab and 256 MiB / 16,384 bodies across tabs, with a 16 MiB per-body limit. Existing captures are preserved during upgrades; new bytes can be refused when a budget is reached. Local usage counters record stored byte totals, body counts, and limit notices.
 
-## What leaves your device
+Deep-capture tab IDs are saved in Chrome's session storage so the service worker can reconcile attachment ownership after restarting. This session state is cleared by Chrome when the browser session ends. Restart recovery does not attach to previously unattached tabs.
 
-Nothing, automatically. The only ways data leaves the extension are actions
-you take yourself:
+**Clear session** deletes stored capture for that tab. Closing a tab triggers the same cleanup. At browser startup, the extension attempts to prune data for tabs that no longer exist. Cleanup can be interrupted by a crash or storage failure; closing a tab is not a secure-erasure guarantee. Uninstalling the extension removes its local storage through Chrome.
 
-- **Exports** (JSON, CSV, URL list, HAR, ZIP) are saved through Chrome's
-  download dialog to a location you choose.
-- **Downloads** of individual assets work the same way.
+## Network requests and exports
 
-Before storage and export, Asset Lens redacts sensitive values it recognizes
-(authorization/cookie headers, tokens, signed query parameters, and
-high-confidence secret shapes).
+Asset Lens does not send captures to an analytics or collection service. It can still make network requests:
 
-## What the extension does NOT do
+- Opening previews may load assets from their original hosts, including companion files for models.
+- The Streams panel requests manifest text when it opens. Playing HLS requests playlists and segments.
+- ZIP export fetches files whose bodies were not captured, with cookies omitted.
+- Text preview fetches also omit cookies.
+- Individual downloads use captured bytes when available. Otherwise Chrome downloads the original URL and may send cookies for that host according to its download behavior.
+- **Open in new tab** navigates to the asset host normally. **Copy URL** puts the original URL on the clipboard.
 
-- No analytics, telemetry, or crash reporting.
-- No remote servers; the extension has no backend.
-- No remote code execution; all code ships inside the extension package.
-- No selling or sharing of any data with third parties.
-- No use of data for advertising, creditworthiness, or any unrelated purpose.
+These requests reveal the usual connection information, including the request URL and IP address, to the contacted hosts. URL parameters can carry credentials even when cookies are omitted. Browser requests and redirects are subject to the host's policies.
+
+Exports are handed to Chrome's download system and saved where you choose. Files leave the device if you subsequently share them or save them to a synchronized location.
+
+## Redaction
+
+Recognized sensitive headers are redacted before storage. Recognized secret patterns in text-like captured bodies are also redacted. Metadata exports redact sensitive URL parameters and URL credentials, including referring-page URLs.
+
+Redaction is best-effort and does not guarantee removal of personal data or every secret. Original URLs remain in local records and ordinary clipboard actions. Binary bodies are not sanitized. Text redaction can change a downloaded text file. Review exports before sharing them.
 
 ## Permissions
 
-The extension requests only the permissions needed for local inspection:
-`activeTab`, `tabs`, `webRequest`, `scripting`, `storage`, `downloads`,
-`sidePanel`, host access for the pages you choose to inspect, and an
-**optional** `debugger` permission requested only when you enable Deep capture.
+The manifest requests broad host access (`<all_urls>`) plus `activeTab`, `tabs`, `webRequest`, `scripting`, `storage`, `downloads`, and `sidePanel`. Chrome's site-access controls can restrict where the extension runs. The optional `debugger` permission is requested when you enable deep capture.
 
-## Changes
+All application code is bundled with the extension. There is no advertising or sale of captured information.
 
-If this policy changes, the updated text will be published at this same URL
-with a new "Last updated" date.
+## Contact and changes
 
-## Contact
-
-Questions or concerns: open an issue at
-<https://github.com/Amal-David/asset-capture/issues>.
+Questions or concerns can be reported through [GitHub issues](https://github.com/Amal-David/asset-capture/issues). Policy changes will be published in this file with an updated date.

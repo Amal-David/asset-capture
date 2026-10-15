@@ -10,6 +10,7 @@ export type StatusFilter = "all" | "ok" | "redirect" | "client-error" | "server-
 interface InspectorState {
   snapshot?: SessionSnapshot;
   loading: boolean;
+  exporting: boolean;
   error?: string;
   // Filtering: an empty kinds set means "all kinds". Multi-select lets the user
   // see e.g. image+video+audio at once instead of cycling single views.
@@ -47,6 +48,7 @@ interface InspectorState {
   rescan: (tabId?: number) => Promise<void>;
   clear: (tabId?: number) => Promise<void>;
   exportAs: (type: ExportJob["type"], tabId?: number, selectedIds?: string[]) => Promise<void>;
+  cancelExport: (tabId?: number) => Promise<void>;
   toggleDeepCapture: (tabId: number, enabled: boolean) => Promise<void>;
   downloadAsset: (url: string, filename?: string, assetId?: string) => Promise<void>;
   getAssetBody: (assetId: string) => Promise<{ mime: string; dataUrl: string; byteLength: number } | null>;
@@ -56,8 +58,13 @@ interface InspectorState {
   clearPickerResult: () => void;
 }
 
+let refreshVersion = 0;
+let refreshPending = false;
+let inspectedTabId: number | undefined;
+
 export const useInspectorStore = create<InspectorState>((set, get) => ({
   loading: false,
+  exporting: false,
   kinds: new Set<AssetKind>(),
   query: "",
   statusFilter: "all",
@@ -94,12 +101,21 @@ export const useInspectorStore = create<InspectorState>((set, get) => ({
   toggleSortDir: () => set((state) => ({ sortDir: state.sortDir === "asc" ? "desc" : "asc" })),
   resetFilters: () => set({ kinds: new Set<AssetKind>(), query: "", statusFilter: "all", onlyWithBytes: false, onlyPreviewable: false, domain: undefined }),
   refresh: async (tabId, silent) => {
+    if (silent && refreshPending && tabId === inspectedTabId) return;
+    const version = ++refreshVersion;
+    refreshPending = true;
+    if (tabId !== inspectedTabId) {
+      inspectedTabId = tabId;
+      set({ snapshot: undefined, selectedIds: new Set(), pickerActive: false, pickerResult: undefined, lastExport: undefined, exporting: false });
+    }
     // The 1.5s background poll runs silently so it never clears an action error
     // (failed download/export) or flickers the loading state before the user reads it.
     if (!silent) set({ loading: true, error: undefined });
     const response = await sendMessage({ type: "GET_SNAPSHOT", tabId });
+    if (version !== refreshVersion) return;
+    refreshPending = false;
     if (response.ok && "snapshot" in response) {
-      const updates: Partial<InspectorState> = { snapshot: response.snapshot, loading: false };
+      const updates: Partial<InspectorState> = { snapshot: response.snapshot, loading: false, exporting: response.snapshot.exportInProgress ?? false };
       if (response.snapshot.pickerActive !== undefined) {
         updates.pickerActive = response.snapshot.pickerActive;
       }
@@ -110,9 +126,7 @@ export const useInspectorStore = create<InspectorState>((set, get) => ({
       // Prune selection against the live snapshot so deterministic re-captured ids
       // can never silently re-attach a stale selection to assets the user didn't pick.
       const selected = get().selectedIds;
-      // Skip pruning on an empty snapshot (e.g. a transient poll mid-clear) so an
-      // in-progress multi-selection isn't wiped by a momentary empty result.
-      if (selected.size && response.snapshot.assets.length > 0) {
+      if (selected.size) {
         const live = new Set(response.snapshot.assets.map((asset) => asset.id));
         const pruned = new Set([...selected].filter((id) => live.has(id)));
         if (pruned.size !== selected.size) updates.selectedIds = pruned;
@@ -125,7 +139,9 @@ export const useInspectorStore = create<InspectorState>((set, get) => ({
     }
   },
   rescan: async (tabId) => {
+    const targetTabId = tabId ?? inspectedTabId;
     const response = await sendMessage({ type: "RESCAN", tabId });
+    if (inspectedTabId !== targetTabId) return;
     if (!response.ok) {
       set({ error: response.error });
       return;
@@ -133,7 +149,9 @@ export const useInspectorStore = create<InspectorState>((set, get) => ({
     await get().refresh(tabId);
   },
   clear: async (tabId) => {
+    const targetTabId = tabId ?? inspectedTabId;
     const response = await sendMessage({ type: "CLEAR_SESSION", tabId });
+    if (inspectedTabId !== targetTabId) return;
     if (!response.ok) {
       set({ error: response.error });
       return;
@@ -142,13 +160,19 @@ export const useInspectorStore = create<InspectorState>((set, get) => ({
     await get().refresh(tabId);
   },
   exportAs: async (type, tabId, selectedIds) => {
-    set({ loading: true, error: undefined });
+    const targetTabId = tabId ?? inspectedTabId;
+    set({ exporting: true, error: undefined });
     const response = await sendMessage({ type: "EXPORT", exportType: type, tabId, selectedIds });
+    if (inspectedTabId !== targetTabId) return;
     if (response.ok && "export" in response) {
-      set({ lastExport: response.export.job, loading: false });
+      set({ lastExport: response.export.job, exporting: false });
     } else {
-      set({ error: response.ok ? "Unexpected export response" : response.error, loading: false });
+      set({ error: response.ok ? "Unexpected export response" : response.error, exporting: false });
     }
+  },
+  cancelExport: async (tabId) => {
+    const response = await sendMessage({ type: "CANCEL_EXPORT", tabId });
+    if (!response.ok) set({ error: response.error });
   },
   toggleDeepCapture: async (tabId, enabled) => {
     if (enabled) {
@@ -159,6 +183,7 @@ export const useInspectorStore = create<InspectorState>((set, get) => ({
       }
     }
     const response = await sendMessage({ type: "TOGGLE_DEEP_CAPTURE", tabId, enabled });
+    if (inspectedTabId !== tabId) return;
     if (!response.ok) {
       set({ error: response.error });
       return;

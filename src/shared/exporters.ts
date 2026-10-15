@@ -1,4 +1,6 @@
-import { zipSync, strToU8 } from "fflate";
+import { Zip, ZipPassThrough, strToU8 } from "fflate";
+import { MAX_BODY_BYTES, MAX_ZIP_ASSETS, MAX_ZIP_BYTES } from "./limits";
+import { fetchBytesCapped } from "./read-response";
 import type { AssetRecord, ExportFailure, ExportJob, RequestEvent } from "./types";
 import { buildHar } from "./har";
 import { isTextLikeMime, redactHeaders, redactTextContent, redactUrl } from "./redact";
@@ -31,29 +33,34 @@ export interface CapturedBody {
   bytes: Uint8Array;
 }
 
-const MAX_ZIP_FALLBACK_BYTES = 16 * 1024 * 1024;
-
 export async function buildExportPayload(
   type: ExportJob["type"],
   sessionId: string,
   assets: AssetRecord[],
   requests: RequestEvent[],
   selectedIds?: string[],
-  bodies?: Map<string, CapturedBody>
+  bodies?: Map<string, CapturedBody>,
+  signal?: AbortSignal
 ): Promise<ExportPayload> {
-  const selected = selectedIds?.length ? assets.filter((asset) => selectedIds.includes(asset.id)) : assets;
+  const selection = selectedIds === undefined ? undefined : new Set(selectedIds);
+  const selected = selection ? assets.filter((asset) => selection.has(asset.id)) : assets;
+  if (type === "zip" && selected.length > MAX_ZIP_ASSETS) throw new Error(`ZIP supports up to ${MAX_ZIP_ASSETS} assets. Select fewer files.`);
+  signal?.throwIfAborted();
   const startedAt = Date.now();
   const failures: ExportFailure[] = [];
   const redactionSummary = new Set<string>();
 
   const sanitizedAssets = selected.map((asset) => {
     const redacted = redactUrl(asset.url);
-    redacted.flags.forEach((flag) => redactionSummary.add(flag));
+    const initiator = asset.initiator ? redactUrl(asset.initiator) : undefined;
+    const flags = [...redacted.flags, ...(initiator?.flags ?? [])];
+    flags.forEach((flag) => redactionSummary.add(flag));
     return {
       ...asset,
       url: redacted.value,
       originalUrl: undefined,
-      redactionFlags: Array.from(new Set([...asset.redactionFlags, ...redacted.flags]))
+      initiator: initiator?.value,
+      redactionFlags: Array.from(new Set([...asset.redactionFlags, ...flags]))
     };
   });
 
@@ -76,7 +83,7 @@ export async function buildExportPayload(
     bytes = textBytes(JSON.stringify(buildHar(sanitizedAssets, redactRequestEvents(requests, redactionSummary)), null, 2));
   } else {
     mime = "application/zip";
-    bytes = await buildZip(sessionId, selected, sanitizedAssets, requests, failures, redactionSummary, bodies);
+    bytes = await buildZip(sessionId, selected, sanitizedAssets, requests, failures, redactionSummary, bodies, signal);
   }
 
   const job: ExportJob = {
@@ -124,80 +131,74 @@ async function buildZip(
   requests: RequestEvent[],
   failures: ExportFailure[],
   redactionSummary: Set<string>,
-  bodies?: Map<string, CapturedBody>
+  bodies?: Map<string, CapturedBody>,
+  signal?: AbortSignal
 ): Promise<Uint8Array> {
-  const files: Record<string, Uint8Array> = {
-    "metadata.json": textBytes(JSON.stringify({ sessionId, assets: sanitizedAssets }, null, 2)),
-    "requests.har": textBytes(JSON.stringify(buildHar(sanitizedAssets, redactRequestEvents(requests, redactionSummary)), null, 2))
-  };
-
-  const usedNames = new Set(Object.keys(files));
-  for (const asset of originalAssets) {
-    // Prefer bytes already captured in the page world: they cover blob:/auth'd
-    // assets and avoid a credentialed re-fetch that could leak cookies/secrets.
-    const captured = bodies?.get(asset.id);
-    if (captured) {
-      const filename = uniqueName(`assets/${safeFilename(asset.url, asset.id)}`, usedNames);
-      files[filename] = redactBodyBytes(captured.bytes, captured.mime, redactionSummary);
-      continue;
-    }
-
-    if (asset.url.startsWith("blob:") || asset.url.startsWith("data:")) {
-      failures.push({ assetId: asset.id, url: redactUrl(asset.url).value, reason: "Browser-local URL with no captured bytes; reload the page to capture it." });
-      continue;
-    }
-
-    try {
-      const response = await fetch(asset.url, { credentials: "omit", cache: "force-cache" });
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const bytes = await readResponseBytesCapped(response, MAX_ZIP_FALLBACK_BYTES);
-      const filename = uniqueName(`assets/${safeFilename(asset.url, asset.id)}`, usedNames);
-      const ct = response.headers.get("content-type") ?? asset.mime;
-      files[filename] = redactBodyBytes(bytes, ct, redactionSummary);
-    } catch (error) {
-      failures.push({
-        assetId: asset.id,
-        url: redactUrl(asset.url).value,
-        reason: error instanceof Error ? error.message : "Fetch failed"
-      });
-    }
-  }
-
-  files["failures.json"] = textBytes(JSON.stringify({ failures }, null, 2));
-  return zipSync(files, { level: 6 });
-}
-
-async function readResponseBytesCapped(response: Response, limit: number): Promise<Uint8Array> {
-  const declared = Number(response.headers.get("content-length") ?? "");
-  if (declared && declared > limit) throw new Error(`Asset exceeds ${formatLimit(limit)} ZIP fallback limit`);
-  if (!response.body) {
-    const bytes = new Uint8Array(await response.arrayBuffer());
-    if (bytes.byteLength > limit) throw new Error(`Asset exceeds ${formatLimit(limit)} ZIP fallback limit`);
-    return bytes;
-  }
-
-  const reader = response.body.getReader();
   const chunks: Uint8Array[] = [];
-  let total = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    if (!value) continue;
-    total += value.byteLength;
-    if (total > limit) {
-      void reader.cancel();
-      throw new Error(`Asset exceeds ${formatLimit(limit)} ZIP fallback limit`);
+  let outputSize = 0;
+  let inputSize = 0;
+  let archiveError: Error | undefined;
+  const budgetError = () => new Error("ZIP exceeds the 64 MB budget. Select fewer files.");
+  const archive = new Zip((error, chunk) => {
+    if (error) { archiveError = error; throw error; }
+    if (outputSize + chunk.byteLength > MAX_ZIP_BYTES) { archiveError = budgetError(); throw archiveError; }
+    chunks.push(chunk);
+    outputSize += chunk.byteLength;
+  });
+  const usedNames = new Set<string>();
+  const addFile = (name: string, bytes: Uint8Array) => {
+    signal?.throwIfAborted();
+    if (inputSize + bytes.byteLength > MAX_ZIP_BYTES) throw budgetError();
+    inputSize += bytes.byteLength;
+    const file = new ZipPassThrough(uniqueName(name, usedNames));
+    archive.add(file);
+    file.push(bytes, true);
+  };
+  try {
+    addFile("metadata.json", textBytes(JSON.stringify({ sessionId, assets: sanitizedAssets }, null, 2)));
+    addFile("requests.har", textBytes(JSON.stringify(buildHar(sanitizedAssets, redactRequestEvents(requests, redactionSummary)), null, 2)));
+    for (const asset of originalAssets) {
+      signal?.throwIfAborted();
+      try {
+        const captured = bodies?.get(asset.id);
+        // Leave room for the failure report and ZIP directory.
+        const remaining = MAX_ZIP_BYTES - inputSize - 1024 * 1024;
+        if (remaining <= 0) throw budgetError();
+        let bytes: Uint8Array;
+        let mime: string | undefined;
+        if (captured) {
+          if (captured.bytes.byteLength > Math.min(MAX_BODY_BYTES, remaining)) throw budgetError();
+          bytes = captured.bytes;
+          mime = captured.mime;
+        } else {
+          if (asset.url.startsWith("blob:") || asset.url.startsWith("data:")) {
+            throw new Error("Browser-local URL with no captured bytes; reload the page to capture it.");
+          }
+          const fetched = await fetchBytesCapped(asset.url, Math.min(MAX_BODY_BYTES, remaining), signal);
+          bytes = fetched.bytes;
+          mime = fetched.mime ?? asset.mime;
+        }
+        addFile(`assets/${safeFilename(asset.url, asset.id)}`, redactBodyBytes(bytes, mime, redactionSummary));
+      } catch (error) {
+        if (archiveError) throw archiveError;
+        signal?.throwIfAborted();
+        failures.push({ assetId: asset.id, url: redactUrl(asset.url).value, reason: error instanceof Error ? error.message : "Fetch failed" });
+      }
+      // Yield between files so cancellation and inspector messages can run.
+      await new Promise((resolve) => setTimeout(resolve, 0));
     }
-    chunks.push(value);
+    addFile("failures.json", textBytes(JSON.stringify({ failures }, null, 2)));
+    archive.end();
+    const result = new Uint8Array(outputSize);
+    let offset = 0;
+    for (const chunk of chunks) {
+      result.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    return result;
+  } finally {
+    archive.terminate();
   }
-
-  const merged = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    merged.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return merged;
 }
 
 function redactRequestEvents(requests: RequestEvent[], redactionSummary: Set<string>): RequestEvent[] {
@@ -217,10 +218,6 @@ function redactRequestEvents(requests: RequestEvent[], redactionSummary: Set<str
 
 function textBytes(value: string): Uint8Array {
   return strToU8(value);
-}
-
-function formatLimit(bytes: number): string {
-  return `${Math.round(bytes / (1024 * 1024))} MB`;
 }
 
 function csvCell(value: string): string {

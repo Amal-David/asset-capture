@@ -1,6 +1,10 @@
 import { classifyAsset, isGenericMime, isPreviewableKind, sniffMimeFromBytes } from "../shared/classify";
 import { buildExportPayload, bytesToDataUrl } from "../shared/exporters";
-import { clearSession, db, getSnapshot, sessionIdForTab } from "../shared/db";
+import type { CapturedBody } from "../shared/exporters";
+import { clearSession, db, getSnapshot, putAssetBody, recordCaptureLimit, sessionIdForTab } from "../shared/db";
+import { MAX_BODY_BYTES, MAX_ZIP_ASSETS, MAX_ZIP_BYTES } from "../shared/limits";
+import { fetchBytesCapped } from "../shared/read-response";
+import { debuggerReady, deepCaptureTabs, getDeepCaptureState, setDeepCapture } from "./debugger";
 import type { PickerResult, RuntimeMessage, RuntimeResponse } from "../shared/messages";
 import { detectStreamingManifest } from "../shared/manifest";
 import type { AssetRecord, BlobRecord, CaptureSource, MediaRecord, RequestEvent } from "../shared/types";
@@ -9,12 +13,13 @@ import { isTextLikeMime, redactHeaders, redactTextContent } from "../shared/reda
 
 const requestStarts = new Map<string, number>();
 const inspectedTabs = new Map<number, number>();
-const deepCaptureTabs = new Set<number>();
 const pickerActiveTabs = new Set<number>();
 const pendingPickerResults = new Map<number, PickerResult>();
 const ACTIVE_INSPECTION_TTL_MS = 10_000;
-const MAX_STORED_BODY_BYTES = 16 * 1024 * 1024;
+const MAX_STORED_BODY_BYTES = MAX_BODY_BYTES;
 const MAX_STORED_BODY_BASE64_CHARS = Math.ceil(MAX_STORED_BODY_BYTES * 4 / 3) + 4;
+let bodyWritesInFlight = 0;
+let activeExport: { tabId?: number; controller: AbortController } | undefined;
 
 chrome.runtime.onInstalled.addListener(() => {
   void chrome.sidePanel?.setPanelBehavior?.({ openPanelOnActionClick: true });
@@ -35,7 +40,8 @@ async function pruneOrphanSessions(): Promise<void> {
       db.blobs.filter((b) => orphan(b.sessionId)).delete(),
       db.media.filter((m) => orphan(m.sessionId)).delete(),
       db.requests.filter((r) => orphan(r.sessionId)).delete(),
-      db.exports.filter((e) => orphan(e.sessionId)).delete()
+      db.exports.filter((e) => orphan(e.sessionId)).delete(),
+      db.captureUsage.filter((usage) => orphan(usage.sessionId)).delete()
     ]);
   } catch {
     // Best-effort cleanup; never block startup.
@@ -45,6 +51,7 @@ async function pruneOrphanSessions(): Promise<void> {
 chrome.webRequest.onBeforeRequest.addListener(
   (details) => {
     if (!shouldCaptureRequest(details)) return undefined;
+    if (requestStarts.size >= 1000) requestStarts.delete(requestStarts.keys().next().value!);
     requestStarts.set(details.requestId, details.timeStamp);
     void recordRequest(details, "beforeRequest");
     void upsertAssetFromRequest(details, "webRequest");
@@ -75,9 +82,10 @@ chrome.webRequest.onHeadersReceived.addListener(
 
 chrome.webRequest.onCompleted.addListener(
   (details) => {
-    if (!shouldCaptureRequest(details)) return;
-    void recordRequest(details, "completed");
-    void upsertAssetFromRequest(details, "webRequest");
+    if (shouldCaptureRequest(details)) {
+      void recordRequest(details, "completed");
+      void upsertAssetFromRequest(details, "webRequest");
+    }
     requestStarts.delete(details.requestId);
   },
   { urls: ["<all_urls>"] },
@@ -86,8 +94,7 @@ chrome.webRequest.onCompleted.addListener(
 
 chrome.webRequest.onErrorOccurred.addListener(
   (details) => {
-    if (!shouldCaptureRequest(details)) return;
-    void recordRequest(details, "error");
+    if (shouldCaptureRequest(details)) void recordRequest(details, "error");
     requestStarts.delete(details.requestId);
   },
   { urls: ["<all_urls>"] }
@@ -96,8 +103,8 @@ chrome.webRequest.onErrorOccurred.addListener(
 // A closed tab's capture is dead weight (and assetBodies can be many MB each),
 // so reclaim its IndexedDB rows and in-memory state when the tab goes away.
 chrome.tabs.onRemoved.addListener((tabId) => {
+  if (activeExport?.tabId === tabId) activeExport.controller.abort(new Error("Export cancelled: tab closed"));
   inspectedTabs.delete(tabId);
-  deepCaptureTabs.delete(tabId);
   pickerActiveTabs.delete(tabId);
   pendingPickerResults.delete(tabId);
   requestWriteCounts.delete(sessionIdForTab(tabId));
@@ -131,7 +138,14 @@ function ensureDebuggerListeners(): boolean {
 }
 
 function handleDebuggerEvent(source: chrome.debugger.Debuggee, method: string, params?: object): void {
-  if (!source.tabId || !method.startsWith("Network.")) return;
+  const token = source.tabId !== undefined ? deepCaptureTabs.get(source.tabId) : undefined;
+  void debuggerReady.then(async () => {
+    if (token && source.tabId !== undefined && await getDeepCaptureState(source.tabId) && deepCaptureTabs.get(source.tabId) === token) recordDebuggerEvent(source, method, params);
+  }).catch(console.warn);
+}
+
+function recordDebuggerEvent(source: chrome.debugger.Debuggee, method: string, params?: object): void {
+  if (!source.tabId || !deepCaptureTabs.has(source.tabId) || !method.startsWith("Network.")) return;
   const tabId = source.tabId;
   const event = (params ?? {}) as Record<string, unknown>;
   const requestId = typeof event.requestId === "string" ? event.requestId : undefined;
@@ -176,19 +190,29 @@ async function captureDebuggerBody(tabId: number, requestId: string, key: string
   const meta = debuggerResponses.get(key);
   debuggerResponses.delete(key);
   if (!meta) return;
+  const token = deepCaptureTabs.get(tabId);
+  if (!token) return;
+  if (bodyWritesInFlight >= 2) { await recordCaptureLimit(sessionIdForTab(tabId)); return; }
+  bodyWritesInFlight += 1;
   try {
     const result = (await chrome.debugger.sendCommand({ tabId }, "Network.getResponseBody", { requestId })) as { body?: string; base64Encoded?: boolean } | undefined;
     if (!result?.body) return;
+    if (deepCaptureTabs.get(tabId) !== token) return;
+    if (result.body.length > (result.base64Encoded ? MAX_STORED_BODY_BASE64_CHARS : MAX_STORED_BODY_BYTES / 3)) {
+      await recordCaptureLimit(sessionIdForTab(tabId));
+      return;
+    }
     const bytes = result.base64Encoded ? base64ToBytes(result.body) : new TextEncoder().encode(result.body);
-    await persistAssetBody({ sessionId: sessionIdForTab(tabId), tabId, key: meta.url, bytes, declaredMime: meta.mime, source: "devtools" });
+    await persistAssetBody({ sessionId: sessionIdForTab(tabId), tabId, key: meta.url, bytes, declaredMime: meta.mime, source: "devtools", signal: token.signal });
   } catch {
     // Body may be unavailable (evicted, redirect, no content); metadata still stands.
+  } finally {
+    bodyWritesInFlight -= 1;
   }
 }
 
 function handleDebuggerDetach(source: chrome.debugger.Debuggee): void {
   if (!source.tabId) return;
-  deepCaptureTabs.delete(source.tabId);
   const prefix = `${source.tabId}:`;
   for (const key of debuggerResponses.keys()) {
     if (key.startsWith(prefix)) debuggerResponses.delete(key);
@@ -199,6 +223,7 @@ async function handleMessage(message: RuntimeMessage, sender: chrome.runtime.Mes
   const requestedTabId = "tabId" in message ? message.tabId : undefined;
   const tabId = requestedTabId ?? sender.tab?.id ?? (await getActiveTabId());
   if (message.type === "GET_SNAPSHOT") {
+    const attached = await getDeepCaptureState(tabId);
     const newlyInspected = markInspected(tabId);
     if (newlyInspected && tabId) void requestTabRescan(tabId);
     const snapshot = await getSnapshot(tabId);
@@ -208,8 +233,9 @@ async function handleMessage(message: RuntimeMessage, sender: chrome.runtime.Mes
       ok: true,
       snapshot: {
         ...snapshot,
-        deepCaptureAttached: Boolean(tabId && deepCaptureTabs.has(tabId)),
-        pickerActive: Boolean(tabId && pickerActiveTabs.has(tabId))
+        deepCaptureAttached: attached,
+        pickerActive: Boolean(tabId && pickerActiveTabs.has(tabId)),
+        exportInProgress: activeExport !== undefined && activeExport.tabId === tabId
       },
       pickerResult
     };
@@ -245,28 +271,57 @@ async function handleMessage(message: RuntimeMessage, sender: chrome.runtime.Mes
   }
 
   if (message.type === "EXPORT") {
-    const snapshot = await getSnapshot(tabId);
-    // ZIP embeds bytes; prefer the bytes we already captured (works for blob:/
-    // authenticated assets) over a credentialed re-fetch that could leak secrets.
-    const bodies = message.exportType === "zip"
-      ? new Map((await db.assetBodies.where("sessionId").equals(snapshot.sessionId).toArray()).map((body) => [body.assetId, { mime: body.mime, bytes: body.bytes }]))
-      : undefined;
-    const payload = await buildExportPayload(message.exportType, snapshot.sessionId, snapshot.assets, snapshot.requests, message.selectedIds, bodies);
-    await db.exports.put(payload.job);
-    const url = bytesToDataUrl(payload.bytes, payload.mime);
-    await chrome.downloads.download({ url, filename: payload.filename, saveAs: true });
-    return {
-      ok: true,
-      export: {
-        job: payload.job,
-        filename: payload.filename,
-        mime: payload.mime,
-        byteLength: payload.bytes.byteLength
+    if (activeExport) return { ok: false, error: "Another export is running. Wait or cancel it first." };
+    const controller = new AbortController();
+    activeExport = { tabId, controller };
+    const deadline = setTimeout(() => controller.abort(new Error("Export exceeded the two-minute time limit")), 120_000);
+    try {
+      const snapshot = await getSnapshot(tabId, message.exportType === "har" || message.exportType === "zip");
+      // ZIP embeds bytes; prefer the bytes we already captured (works for blob:/
+      // authenticated assets) over a credentialed re-fetch that could leak secrets.
+      let bodies: Map<string, CapturedBody> | undefined;
+      if (message.exportType === "zip") {
+        const selection = message.selectedIds === undefined ? undefined : new Set(message.selectedIds);
+        const bodyIds = snapshot.assets.filter((asset) => !selection || selection.has(asset.id)).map((asset) => asset.id);
+        if (bodyIds.length > MAX_ZIP_ASSETS) throw new Error(`ZIP supports up to ${MAX_ZIP_ASSETS} assets. Select fewer files.`);
+        bodies = new Map();
+        let bytes = 0;
+        for (const id of bodyIds) {
+          controller.signal.throwIfAborted();
+          const body = await db.assetBodies.get(id);
+          if (!body) continue;
+          bytes += body.byteLength;
+          if (bytes > MAX_ZIP_BYTES) throw new Error("Selected captures exceed the 64 MB ZIP budget. Select fewer files.");
+          bodies.set(id, { mime: body.mime, bytes: body.bytes });
+        }
       }
-    };
+      const payload = await buildExportPayload(message.exportType, snapshot.sessionId, snapshot.assets, snapshot.requests, message.selectedIds, bodies, controller.signal);
+      controller.signal.throwIfAborted();
+      await db.exports.put(payload.job);
+      const url = bytesToDataUrl(payload.bytes, payload.mime);
+      await chrome.downloads.download({ url, filename: payload.filename, saveAs: true });
+      return {
+        ok: true,
+        export: {
+          job: payload.job,
+          filename: payload.filename,
+          mime: payload.mime,
+          byteLength: payload.bytes.byteLength
+        }
+      };
+    } finally {
+      clearTimeout(deadline);
+      activeExport = undefined;
+    }
+  }
+
+  if (message.type === "CANCEL_EXPORT") {
+    if (activeExport && activeExport.tabId === tabId) activeExport.controller.abort(new Error("Export cancelled"));
+    return { ok: true };
   }
 
   if (message.type === "TOGGLE_DEEP_CAPTURE") {
+    ensureDebuggerListeners();
     markInspected(message.tabId);
     const attached = await setDeepCapture(message.tabId, message.enabled);
     return { ok: true, deepCaptureAttached: attached };
@@ -291,19 +346,17 @@ async function handleMessage(message: RuntimeMessage, sender: chrome.runtime.Mes
     try {
       // host_permissions grant cross-origin reads, so this is a normal cors/basic
       // response (never opaque); real failures throw to the catch below.
-      const response = await fetch(message.url, { credentials: "omit" });
-      const LIMIT = 200_000;
-      const { text: raw, truncated } = await readTextCapped(response, LIMIT);
+      const response = await fetchBytesCapped(message.url, 200_000);
+      const raw = new TextDecoder().decode(response.bytes);
       // Redact secrets in the body before it ever reaches the UI / clipboard.
       const redacted = redactTextContent(raw).value;
       return {
         ok: true,
         text: {
           content: redacted,
-          truncated,
-          ok: response.ok,
-          status: response.status,
-          contentType: response.headers.get("content-type") ?? undefined
+          truncated: false,
+          ok: true,
+          contentType: response.mime
         }
       };
     } catch (error) {
@@ -405,6 +458,10 @@ async function requestTabRescan(tabId: number): Promise<void> {
 async function recordPageHookEvent(message: Extract<RuntimeMessage, { type: "PAGE_HOOK_EVENT" }>, tabId?: number, frameId?: number, pageUrl?: string): Promise<void> {
   const sessionId = sessionIdForTab(tabId);
   const event = message.event;
+  if (event.kind === "capture-limit") {
+    await recordCaptureLimit(sessionId);
+    return;
+  }
   if (event.kind === "blob") {
     // An empty blobUrl has no correlation key; recording it would collide every
     // such event into one junk blob record and a blank-URL asset row.
@@ -498,47 +555,30 @@ async function storeAssetBody(
   message: Extract<RuntimeMessage, { type: "ASSET_BODY" }>,
   tabId?: number
 ): Promise<void> {
-  if (message.base64.length > MAX_STORED_BODY_BASE64_CHARS) return;
-  let bytes: Uint8Array;
-  try {
-    bytes = base64ToBytes(message.base64);
-  } catch {
+  if (message.base64.length > MAX_STORED_BODY_BASE64_CHARS || bodyWritesInFlight >= 2) {
+    await recordCaptureLimit(sessionIdForTab(tabId));
     return;
   }
-  await persistAssetBody({
-    sessionId: sessionIdForTab(tabId),
-    tabId,
-    key: message.key,
-    bytes,
-    declaredMime: message.mime,
-    pageUrl: message.pageUrl,
-    source: message.key.startsWith("blob:") ? "blob" : "fetch"
-  });
-}
-
-// Stream a text response and stop at the limit, so a huge/streamed body never
-// fully buffers in the MV3 worker before being sliced.
-async function readTextCapped(response: Response, limit: number): Promise<{ text: string; truncated: boolean }> {
-  if (!response.body) {
-    const raw = await response.text();
-    return raw.length > limit ? { text: raw.slice(0, limit), truncated: true } : { text: raw, truncated: false };
-  }
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let text = "";
-  let truncated = false;
+  bodyWritesInFlight += 1;
   try {
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      text += decoder.decode(value, { stream: true });
-      if (text.length > limit) { text = text.slice(0, limit); truncated = true; void reader.cancel(); break; }
+    let bytes: Uint8Array;
+    try {
+      bytes = base64ToBytes(message.base64);
+    } catch {
+      return;
     }
-    if (!truncated) text += decoder.decode();
-  } catch {
-    // Return whatever was read.
+    await persistAssetBody({
+      sessionId: sessionIdForTab(tabId),
+      tabId,
+      key: message.key,
+      bytes,
+      declaredMime: message.mime,
+      pageUrl: message.pageUrl,
+      source: message.key.startsWith("blob:") ? "blob" : "fetch"
+    });
+  } finally {
+    bodyWritesInFlight -= 1;
   }
-  return { text, truncated };
 }
 
 async function persistAssetBody(input: {
@@ -549,6 +589,7 @@ async function persistAssetBody(input: {
   declaredMime?: string;
   pageUrl?: string;
   source: CaptureSource;
+  signal?: AbortSignal;
 }): Promise<void> {
   const { sessionId, tabId, key, bytes, declaredMime, pageUrl, source } = input;
   if (!key || bytes.byteLength === 0 || bytes.byteLength > MAX_STORED_BODY_BYTES) return;
@@ -576,13 +617,16 @@ async function persistAssetBody(input: {
     }
   }
   try {
-    await db.assetBodies.put({ assetId, sessionId, mime, bytes: storedBytes, byteLength: storedBytes.byteLength, createdAt: Date.now() });
+    if (!await putAssetBody({ assetId, sessionId, mime, bytes: storedBytes, byteLength: storedBytes.byteLength, createdAt: Date.now() }, input.signal)) return;
   } catch {
+    if (input.signal?.aborted) return;
     // Quota or storage failure must not break capture; the asset stays metadata-only.
+    await recordCaptureLimit(sessionId);
     return;
   }
   // Atomic flag flip + re-classification so a concurrent upsertAsset can't clobber
   // the merge, and so byte-derived knowledge upgrades a previously-binary asset.
+  if (input.signal?.aborted) return;
   const updated = await db.assets.where("id").equals(assetId).modify((asset) => {
     asset.bodyAvailable = true;
     if (sniffed && isGenericMime(asset.mime)) asset.mime = sniffed;
@@ -594,6 +638,7 @@ async function persistAssetBody(input: {
     asset.updatedAt = Date.now();
   });
   if (updated > 0) return;
+  if (input.signal?.aborted) return;
   // Body may arrive before the metadata event; create the asset so it is visible.
   await upsertAsset({ sessionId, tabId, url: key, mime, initiator: pageUrl, sources: [source], bodyAvailable: true, redactionFlags });
 }
@@ -769,75 +814,6 @@ async function upsertMedia(partial: Partial<MediaRecord> & Pick<MediaRecord, "ma
   await db.media.put(media);
 }
 
-async function setDeepCapture(tabId: number, enabled: boolean): Promise<boolean> {
-  const debuggee = { tabId };
-  if (!enabled) {
-    if (deepCaptureTabs.has(tabId)) await chrome.debugger.detach(debuggee);
-    await setClosedShadowCapture(tabId, false);
-    deepCaptureTabs.delete(tabId);
-    return false;
-  }
-
-  if (!deepCaptureTabs.has(tabId)) {
-    if (!ensureDebuggerListeners()) throw new Error("Chrome debugger API is unavailable.");
-    await chrome.debugger.attach(debuggee, "1.3");
-    // Explicit buffer sizing: without it, large or slow response bodies are
-    // evicted from the CDP buffer before Network.getResponseBody can read them.
-    await chrome.debugger.sendCommand(debuggee, "Network.enable", {
-      maxTotalBufferSize: 256 * 1024 * 1024,
-      maxResourceBufferSize: 2 * MAX_STORED_BODY_BYTES
-    });
-    await setClosedShadowCapture(tabId, true);
-    deepCaptureTabs.add(tabId);
-  }
-  return true;
-}
-
-async function setClosedShadowCapture(tabId: number, enabled: boolean): Promise<void> {
-  try {
-    await chrome.scripting.executeScript({
-      target: { tabId, allFrames: true },
-      world: "MAIN",
-      func: enabled ? enableClosedShadowCapture : disableClosedShadowCapture
-    });
-  } catch {
-    // Optional hardening path: debugger capture still works when a frame refuses injection.
-  }
-}
-
-function enableClosedShadowCapture(): void {
-  const key = "__assetInspectorClosedShadowCapture";
-  const target = window as typeof window & {
-    [key]?: {
-      original: typeof Element.prototype.attachShadow;
-      patched: typeof Element.prototype.attachShadow;
-      enabled: boolean;
-    };
-  };
-  const existing = target[key];
-  if (existing?.enabled) return;
-  const original = existing?.original ?? Element.prototype.attachShadow;
-  const patched = function patchedAttachShadow(this: Element, init: ShadowRootInit): ShadowRoot {
-    return original.call(this, { ...init, mode: "open" });
-  } as typeof Element.prototype.attachShadow;
-  target[key] = { original, patched, enabled: true };
-  Element.prototype.attachShadow = patched;
-}
-
-function disableClosedShadowCapture(): void {
-  const key = "__assetInspectorClosedShadowCapture";
-  const target = window as typeof window & {
-    [key]?: {
-      original: typeof Element.prototype.attachShadow;
-      patched: typeof Element.prototype.attachShadow;
-      enabled: boolean;
-    };
-  };
-  const state = target[key];
-  if (!state?.enabled) return;
-  if (Element.prototype.attachShadow === state.patched) Element.prototype.attachShadow = state.original;
-  state.enabled = false;
-}
 
 async function getActiveTabId(): Promise<number | undefined> {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });

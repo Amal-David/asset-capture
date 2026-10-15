@@ -3,21 +3,43 @@
   // and API-rendered assets stay previewable and downloadable after their URL
   // goes stale. Reads stay off the synchronous return path and are size-capped.
   const MAX_BODY_BYTES = 16 * 1024 * 1024;
+  const pendingBodies = new Map<number, number>();
+  let pendingBytes = 0;
+  let nextBodyId = 0;
+  let activeReaders = 0;
+  let lastLimitNotice = 0;
 
   // "/" restricts delivery to this same window's origin (and handles opaque
   // origins), so captured bytes aren't broadcast to cross-origin frames.
   const post = (payload: unknown) => {
     window.postMessage({ source: "asset-lens-page-hook", payload }, "/");
   };
+  const reportLimit = () => {
+    if (Date.now() - lastLimitNotice < 10_000) return;
+    lastLimitNotice = Date.now();
+    post({ kind: "capture-limit", timestamp: Date.now() });
+  };
+  window.addEventListener("message", (event) => {
+    if (event.source !== window || event.data?.source !== "asset-lens-body-ack") return;
+    const size = pendingBodies.get(event.data.id);
+    if (size === undefined) return;
+    pendingBytes -= size;
+    pendingBodies.delete(event.data.id);
+  });
 
   const postBody = (key: string, mime: string | undefined, buffer: ArrayBuffer | undefined) => {
-    if (!key || !buffer || buffer.byteLength === 0 || buffer.byteLength > MAX_BODY_BYTES) return;
-    window.postMessage({ source: "asset-lens-page-hook-body", payload: { key, mime, buffer } }, "/");
+    if (!key || !buffer || buffer.byteLength === 0) return;
+    if (buffer.byteLength > MAX_BODY_BYTES || pendingBodies.size >= 64 || pendingBytes + buffer.byteLength > 2 * MAX_BODY_BYTES) { reportLimit(); return; }
+    const id = ++nextBodyId;
+    pendingBodies.set(id, buffer.byteLength);
+    pendingBytes += buffer.byteLength;
+    window.postMessage({ source: "asset-lens-page-hook-body", payload: { id, key, mime, buffer } }, "/");
   };
 
   const captureBlobBody = (key: string, blob: Blob) => {
-    if (blob.size > MAX_BODY_BYTES) return;
-    void blob.arrayBuffer().then((buffer) => postBody(key, blob.type || undefined, buffer)).catch(() => undefined);
+    if (blob.size > MAX_BODY_BYTES || activeReaders >= 2) { reportLimit(); return; }
+    activeReaders += 1;
+    void blob.arrayBuffer().then((buffer) => postBody(key, blob.type || undefined, buffer)).catch(() => undefined).finally(() => { activeReaders -= 1; });
   };
 
   // Hook events must be keyed by absolute URLs: a relative fetch("/api/x") must
@@ -31,31 +53,41 @@
     }
   };
 
-  const textToBuffer = (value: string): ArrayBuffer => new TextEncoder().encode(value).buffer;
+  const textToBuffer = (value: string): ArrayBuffer | undefined => {
+    if (value.length * 3 > MAX_BODY_BYTES) { reportLimit(); return; }
+    return new TextEncoder().encode(value).buffer;
+  };
 
   // Read a response body incrementally and abort the moment it exceeds the cap, so
   // an unbounded/chunked stream (NDJSON, log tail, streamed export) can't buffer the
   // whole thing into memory via clone().arrayBuffer() before the size check.
   const readCapped = async (response: Response, key: string, mime: string | undefined) => {
-    if (!response.body) {
-      try { postBody(key, mime, await response.arrayBuffer()); } catch { /* ignore */ }
-      return;
-    }
+    if (!response.body) return;
+    if (activeReaders >= 2) { reportLimit(); void response.body.cancel().catch(() => undefined); return; }
+    activeReaders += 1;
     const reader = response.body.getReader();
     const chunks: Uint8Array[] = [];
     let total = 0;
+    let timedOut = false;
+    const timeout = setTimeout(() => { timedOut = true; reportLimit(); void reader.cancel().catch(() => undefined); }, 15_000);
     try {
       for (;;) {
         const { done, value } = await reader.read();
         if (done) break;
         if (!value) continue;
         total += value.byteLength;
-        if (total > MAX_BODY_BYTES) { void reader.cancel(); return; }
+        if (total > MAX_BODY_BYTES) { reportLimit(); void reader.cancel().catch(() => undefined); return; }
+        if (chunks.length >= 1024) { reportLimit(); void reader.cancel().catch(() => undefined); return; }
         chunks.push(value);
       }
     } catch {
       return;
+    } finally {
+      clearTimeout(timeout);
+      activeReaders -= 1;
+      reader.releaseLock();
     }
+    if (timedOut) return;
     const merged = new Uint8Array(total);
     let offset = 0;
     for (const chunk of chunks) { merged.set(chunk, offset); offset += chunk.byteLength; }
@@ -69,13 +101,20 @@
   const mediaSourceUrls = new WeakMap<MediaSource, string>();
   const sourceBufferOwner = new WeakMap<SourceBuffer, MediaSource>();
   const mseParts = new Map<string, { parts: Uint8Array[]; total: number; timer?: number; lastPosted?: number }>();
+  let mseBytes = 0;
 
   const accumulateMse = (url: string, chunk: Uint8Array) => {
+    if (!chunk.byteLength) return;
     let entry = mseParts.get(url);
+    if (entry && entry.parts.length >= 1024) { reportLimit(); return; }
+    if ((!entry && mseParts.size >= 16) || mseBytes >= MAX_BODY_BYTES) { reportLimit(); return; }
     if (!entry) { entry = { parts: [], total: 0 }; mseParts.set(url, entry); }
-    if (entry.total >= MAX_BODY_BYTES) return;
-    entry.parts.push(chunk);
-    entry.total += chunk.byteLength;
+    const available = MAX_BODY_BYTES - mseBytes;
+    if (chunk.byteLength > available) reportLimit();
+    const part = chunk.subarray(0, available).slice();
+    entry.parts.push(part);
+    entry.total += part.byteLength;
+    mseBytes += part.byteLength;
     if (entry.timer) clearTimeout(entry.timer);
     const current = entry;
     entry.timer = window.setTimeout(() => {
@@ -131,8 +170,8 @@
         const url = owner ? mediaSourceUrls.get(owner) : undefined;
         if (url) {
           const view = data instanceof ArrayBuffer
-            ? new Uint8Array(data.slice(0))
-            : new Uint8Array(data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength));
+            ? new Uint8Array(data)
+            : new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
           accumulateMse(url, view);
         }
       } catch {
@@ -146,6 +185,7 @@
     post({ kind: "blob-revoked", blobUrl: url, timestamp: Date.now() });
     const entry = mseParts.get(url);
     if (entry?.timer) clearTimeout(entry.timer);
+    mseBytes -= entry?.total ?? 0;
     mseParts.delete(url); // release accumulated MSE segments for this stream
     return originalRevokeObjectURL(url);
   };
@@ -198,6 +238,7 @@
       const isStreamableMedia = (mime ?? "").startsWith("video/") || (mime ?? "").startsWith("audio/");
       const shouldRead = declared ? declared <= MAX_BODY_BYTES : !isStreamableMedia;
       if (shouldRead) void readCapped(response.clone(), url, mime);
+      else reportLimit();
     }
     return response;
   };
@@ -235,7 +276,13 @@
         } else if (responseType === "blob") {
           if (this.response instanceof Blob) captureBlobBody(meta.url, this.response);
         } else if (responseType === "json" && this.response !== null && this.response !== undefined) {
-          postBody(meta.url, mime ?? "application/json", textToBuffer(JSON.stringify(this.response)));
+          let estimate = 0;
+          const text = JSON.stringify(this.response, (key, value) => {
+            estimate += key.length * 6 + (typeof value === "string" ? value.length * 6 : 32);
+            if (estimate > MAX_BODY_BYTES) { reportLimit(); throw new Error("JSON capture limit"); }
+            return value;
+          });
+          postBody(meta.url, mime ?? "application/json", textToBuffer(text));
         }
       } catch {
         // Reading a response in an unexpected state must never break the page.

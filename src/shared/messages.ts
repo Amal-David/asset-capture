@@ -1,6 +1,7 @@
 import type { AssetKind, AssetRecord, BlobRecord, ExportResult, MediaRecord, RequestEvent, SessionSnapshot } from "./types";
 
 export type PageHookEvent =
+  | { kind: "capture-limit"; timestamp: number }
   | { kind: "fetch" | "xhr"; url: string; method?: string; status?: number; mime?: string; size?: number; timestamp: number }
   | { kind: "blob"; blobUrl: string; mime?: string; size?: number; producerApi: string; stack?: string; hintKind?: AssetKind; timestamp: number }
   | { kind: "blob-revoked"; blobUrl: string; timestamp: number }
@@ -27,6 +28,7 @@ export type RuntimeMessage =
   | { type: "CLEAR_SESSION"; tabId?: number }
   | { type: "RESCAN"; tabId?: number }
   | { type: "EXPORT"; exportType: "json" | "csv" | "url-list" | "har" | "zip"; tabId?: number; selectedIds?: string[] }
+  | { type: "CANCEL_EXPORT"; tabId?: number }
   | { type: "TOGGLE_DEEP_CAPTURE"; tabId: number; enabled: boolean }
   | { type: "ASSET_BODY"; key: string; mime?: string; base64: string; pageUrl: string }
   | { type: "GET_ASSET_BODY"; assetId: string; tabId?: number }
